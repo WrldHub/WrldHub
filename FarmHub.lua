@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.5"
+local SCRIPT_VERSION = "2026.10.12.6"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -1488,7 +1488,13 @@ local hubMain = { labels = {}, target = nil, targetWorld = nil, rotation = 0,
     updateBusy = false, updateText = "Checking GitHub...", updateSource = nil, newer = false }
 -- Live client performance. RenderStepped samples the actual rendered frame rate.
 hubMain.performance = {frames = 0, elapsed = 0, longest = 0, fps = nil, frameMs = nil,
-    stats = game:GetService("Stats"), capStatus = "Unlimited", originalCap = nil, capApplied = false}
+    stats = game:GetService("Stats"), capStatus = "Unlimited", originalCap = nil, capApplied = false,
+    focused = true, choice = nil, focusQuery = type(iswindowactive) == "function" and iswindowactive
+        or type(isrbxactive) == "function" and isrbxactive or nil}
+if hubMain.performance.focusQuery then
+    local ok, focused = pcall(hubMain.performance.focusQuery)
+    if ok and type(focused) == "boolean" then hubMain.performance.focused = focused end
+end
 if type(getfpscap) == "function" then
     local ok, cap = pcall(getfpscap)
     if ok and type(cap) == "number" then hubMain.performance.originalCap = cap end
@@ -1507,17 +1513,33 @@ function hubMain.frame(delta)
     end
 end
 function hubMain.setFpsLimit(choice)
-    local cap = choice == "15" and 15 or choice == "60" and 60 or 0
     local p = hubMain.performance
+    p.choice = choice
+    local selectedCap = choice == "15" and 15 or choice == "60" and 60 or 0
+    local cap = p.focused and selectedCap or 30
+    local description = p.focused and (selectedCap == 0 and "Unlimited" or tostring(selectedCap))
+        or ("30 (background; focused: " .. (selectedCap == 0 and "Unlimited" or tostring(selectedCap)) .. ")")
     if type(setfpscap) ~= "function" then
         p.capStatus = "FPS limiter is unavailable in this executor"
     else
         local ok, failure = pcall(setfpscap, cap)
         if ok then p.capApplied = true end
-        p.capStatus = ok and ("FPS limit: " .. (cap == 0 and "Unlimited" or tostring(cap)))
+        p.capStatus = ok and ("FPS limit: " .. description)
             or ("Could not set FPS limit: " .. tostring(failure))
     end
     if hubMain.labels.fpsSetting then hubMain.labels.fpsSetting.Text = p.capStatus end
+end
+function hubMain.setFocused(focused)
+    if type(focused) ~= "boolean" or focused == hubMain.performance.focused then return end
+    hubMain.performance.focused = focused
+    hubMain.setFpsLimit(S("Session.FpsLimit") or hubMain.performance.choice or "60")
+end
+function hubMain.checkFocus()
+    local query = hubMain.performance.focusQuery
+    if query then
+        local ok, focused = pcall(query)
+        if ok then hubMain.setFocused(focused) end
+    end
 end
 function hubMain.renderPerformance()
     if not hubMain.labels.performance then return end
@@ -2573,6 +2595,7 @@ local function buildTabs()
     addDropdown(section, "FPS limit", "Session.FpsLimit", {"15", "60", "Unlimited"}, fpsDefault, hubMain.setFpsLimit)
     hubMain.labels.fpsSetting = addLabel(section, "", COLORS.dim)
     hubMain.setFpsLimit(getSetting("Session.FpsLimit", fpsDefault))
+    addLabel(section, "Background windows use 30 FPS. Focusing Roblox restores your selected limit.", COLORS.dim)
     addToggle(section, "Anti AFK", "Session.AntiAfk", true, setAntiAfk)
     addDropdown(section, "Anti AFK method (every minute)", "Session.AntiAfkMethod",
         { "Click + Jump", "Click", "Jump" }, "Click + Jump", W)
@@ -2683,6 +2706,10 @@ local function startFeatures()
 
 every("Farming catalog", 5, farmCatalog.refresh)
 connect(RunService.RenderStepped, hubMain.frame)
+connect(UserInputService.WindowFocusReleased, function() hubMain.setFocused(false) end)
+connect(UserInputService.WindowFocused, function() hubMain.setFocused(true) end)
+hubMain.checkFocus()
+every("Window focus", 1, hubMain.checkFocus)
 every("Main dashboard", 1, hubMain.render)
 hubMain.checkUpdate()
 
