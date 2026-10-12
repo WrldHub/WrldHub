@@ -4,6 +4,9 @@
 -- Right Shift hides/shows the window by default; change the key in Settings.
 -- Settings > Unload stops everything and removes it.
 
+-- Increment the release version when publishing changes to this script.
+local SCRIPT_VERSION = "2026.10.12.1"
+local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
 local Players = game:GetService("Players")
@@ -214,6 +217,17 @@ function configStore.validate(document)
                     assert(type(index) == "number" and index >= 1 and index <= #copied
                         and type(name) == "string" and not seen[name], "Invalid selections for " .. key)
                     seen[name] = true
+                end
+            end
+            if key == "MobFarm.ByWorld" then
+                for world, names in pairs(copied) do
+                    assert(type(world) == "string" and type(names) == "table" and #names <= 128, "Invalid world selections")
+                    local seen = {}
+                    for index, name in pairs(names) do
+                        assert(type(index) == "number" and index >= 1 and index <= #names
+                            and type(name) == "string" and not seen[name], "Invalid mobs for " .. world)
+                        seen[name] = true
+                    end
                 end
             end
             local limits = configStore.bounds[key]
@@ -723,7 +737,7 @@ local function addToggle(section, text, key, default, onChange)
     }, track)
     round(knob, 7)
 
-    local toggle = {}
+    local toggle = {label = text}
     local function render()
         local on = settings[key] == true
         track.BackgroundColor3 = on and COLORS.accent or COLORS.off
@@ -1470,7 +1484,193 @@ end
 
 -- Discover regular worlds from the game, including worlds not visited/unlocked yet.
 -- The Maps folder is deliberately separate from Gamemodes and Training.
-local farmCatalog = { dropdowns = {}, cached = {}, mobs = nil }
+local hubMain = { labels = {}, target = nil, targetWorld = nil, rotation = 0,
+    updateBusy = false, updateText = "Checking GitHub...", updateSource = nil, newer = false }
+function hubMain.sum(values)
+    local total = 0
+    for _, value in pairs(values or {}) do if type(value) == "number" then total += value end end
+    return total
+end
+function hubMain.claimed(data)
+    local result = {}
+    local function scan(prefix, values)
+        for key, value in pairs(values or {}) do
+            if value == true then result[prefix .. tostring(key)] = true end
+        end
+    end
+    scan("Achievement:", data.Achievements)
+    scan("Level:", data.Level and data.Level.Rewards)
+    scan("Daily:" .. tostring(data.DailyRewards and data.DailyRewards.Start) .. ":", data.DailyRewards and data.DailyRewards.Claimed)
+    scan("Time:" .. tostring(data.TimeRewards and data.TimeRewards.ResetAt) .. ":", data.TimeRewards and data.TimeRewards.Claimed)
+    for section, values in pairs(data.IndexRewards or {}) do scan("Index:" .. section .. ":", values) end
+    for id, message in pairs(data.Inbox and data.Inbox.List or {}) do
+        if message.Claimed then result["Inbox:" .. id] = true end
+    end
+    return result
+end
+function hubMain.resetStats()
+    local data = Omni.Data
+    local stats = data.Profile and data.Profile.Stats or {}
+    hubMain.session = {owner = player.UserId, start = workspace:GetServerTimeNow(),
+        kills = 0, damage = 0, rewards = 0, entered = 0, ended = 0, items = 0,
+        lastKills = tonumber(stats["Defeated Enemies"]) or hubMain.sum(data.Index and data.Index.Enemy),
+        lastDamage = tonumber(stats["Damage Dealt"]) or 0,
+        lastItems = hubMain.sum(data.Index and data.Index.Item),
+        yenStart = tonumber(data.Yen) or 0, seen = hubMain.claimed(data),
+        mode = data.Gamemode, sessionId = data.GamemodeSession}
+    env.FarmHubSessionStats = hubMain.session
+end
+if type(env.FarmHubSessionStats) == "table" and env.FarmHubSessionStats.owner == player.UserId then
+    hubMain.session = env.FarmHubSessionStats
+else
+    hubMain.resetStats()
+end
+function hubMain.sample(data)
+    local session = hubMain.session
+    local stats = data.Profile and data.Profile.Stats or {}
+    local kills = tonumber(stats["Defeated Enemies"]) or hubMain.sum(data.Index and data.Index.Enemy)
+    local damage = tonumber(stats["Damage Dealt"]) or 0
+    local items = hubMain.sum(data.Index and data.Index.Item)
+    session.kills += math.max(0, kills - session.lastKills)
+    session.damage += math.max(0, damage - session.lastDamage)
+    session.items += math.max(0, items - session.lastItems)
+    session.lastKills, session.lastDamage, session.lastItems = kills, damage, items
+    for key in pairs(hubMain.claimed(data)) do
+        if not session.seen[key] then session.rewards += 1; session.seen[key] = true end
+    end
+    if data.Gamemode ~= session.mode or (data.Gamemode and data.GamemodeSession ~= session.sessionId) then
+        if session.mode then session.ended += 1 end
+        if data.Gamemode then session.entered += 1 end
+        session.mode, session.sessionId = data.Gamemode, data.GamemodeSession
+    end
+end
+function hubMain.health(enemy)
+    local data = enemy:FindFirstChild("Data")
+    local health = data and data:FindFirstChild("Health")
+    return health and tonumber(health.Value) or math.huge
+end
+function hubMain.pick(enemies, position, names, mode, finish)
+    local candidates = {}
+    for _, enemy in ipairs(enemies) do
+        if not enemy:GetAttribute("Died") and hubMain.health(enemy) > 0 then candidates[#candidates + 1] = enemy end
+    end
+    if hubMain.target and table.find(candidates, hubMain.target)
+        and (finish or mode == "Rotate Types") then return hubMain.target end
+    local pool = candidates
+    if mode == "Bosses First" then
+        local bosses = {}
+        for _, enemy in ipairs(candidates) do
+            local difficulty = enemy:GetAttribute("Difficulty")
+            if difficulty == "Boss" or difficulty == "Secret" or difficulty == "World Boss"
+                or enemy:GetAttribute("Boss") == true then bosses[#bosses + 1] = enemy end
+        end
+        if #bosses > 0 then pool = bosses end
+    elseif mode == "Rotate Types" and #names > 0 then
+        for offset = 1, #names do
+            local index = ((hubMain.rotation + offset - 1) % #names) + 1
+            local group = {}
+            for _, enemy in ipairs(candidates) do
+                if enemy:GetAttribute("EnemyName") == names[index] then group[#group + 1] = enemy end
+            end
+            if #group > 0 then pool = group; hubMain.rotation = index; break end
+        end
+    end
+    local best, bestHealth, bestDistance = nil, math.huge, math.huge
+    for _, enemy in ipairs(pool) do
+        local distance = (enemyPosition(enemy) - position).Magnitude
+        local health = mode == "Lowest Health" and hubMain.health(enemy) or 0
+        if health < bestHealth or (health == bestHealth and distance < bestDistance) then
+            best, bestHealth, bestDistance = enemy, health, distance
+        end
+    end
+    return best
+end
+function hubMain.versionNewer(remote, localVersion)
+    local a, b = {}, {}
+    for part in remote:gmatch("%d+") do a[#a + 1] = tonumber(part) end
+    for part in localVersion:gmatch("%d+") do b[#b + 1] = tonumber(part) end
+    for i = 1, math.max(#a, #b) do
+        if (a[i] or 0) ~= (b[i] or 0) then return (a[i] or 0) > (b[i] or 0) end
+    end
+    return false
+end
+function hubMain.updateLabel()
+    if alive and hubMain.labels.update then
+        hubMain.labels.update.Text = "Installed: " .. SCRIPT_VERSION .. "\n" .. hubMain.updateText
+    end
+end
+function hubMain.checkUpdate()
+    if hubMain.updateBusy then return end
+    hubMain.updateBusy = true
+    hubMain.updateText = "Checking GitHub..."
+    hubMain.updateLabel()
+    local thread = task.spawn(function()
+        local ok, source = pcall(function() return game:HttpGet(SCRIPT_URL .. "?t=" .. os.time()) end)
+        if not alive then return end
+        local version = ok and type(source) == "string" and source:match('local SCRIPT_VERSION = "([^"]+)"')
+        if version then
+            hubMain.newer = hubMain.versionNewer(version, SCRIPT_VERSION)
+            hubMain.updateSource = source
+            hubMain.updateText = hubMain.newer and ("New version available: " .. version .. ". Click Reload from GitHub.")
+                or ("Up to date. GitHub: " .. version)
+        else
+            hubMain.updateSource, hubMain.newer = nil, false
+            hubMain.updateText = "Could not check GitHub. Click Check for Updates to retry."
+        end
+        hubMain.updateBusy = false
+        hubMain.updateLabel()
+    end)
+    featureThreads[#featureThreads + 1] = thread
+end
+function hubMain.reload()
+    if hubMain.updateBusy then return end
+    hubMain.updateBusy = true
+    hubMain.updateText = "Fetching and checking the latest script..."
+    hubMain.updateLabel()
+    local thread = task.spawn(function()
+        local ok, result = pcall(function()
+            local source = game:HttpGet(SCRIPT_URL .. "?t=" .. os.time())
+            assert(type(source) == "string" and source:find("FarmHub", 1, true), "Invalid GitHub response")
+            local compiled, failure = loadstring(source)
+            assert(compiled, failure)
+            if not alive then return end
+            saveSettings()
+            env.FarmHubUnload()
+            compiled()
+        end)
+        if alive then
+            hubMain.updateBusy = false
+            hubMain.updateText = ok and "Reload requested." or ("Reload failed; your hub is still running. " .. tostring(result))
+            hubMain.updateLabel()
+        end
+    end)
+    featureThreads[#featureThreads + 1] = thread
+end
+local farmCatalog = { dropdowns = {}, cached = {}, mobs = nil, world = nil }
+function farmCatalog.remember()
+    local memory = getSetting("MobFarm.ByWorld", {})
+    if not farmCatalog.world then return end
+    local selected, old = S("MobFarm.Mobs"), memory[farmCatalog.world]
+    local changed = not old or #old ~= #selected
+    if not changed then for i, name in ipairs(selected) do if old[i] ~= name then changed = true; break end end end
+    if changed then
+        memory[farmCatalog.world] = table.clone(selected)
+        setSetting("MobFarm.ByWorld", memory)
+    end
+end
+function farmCatalog.switchWorld(world)
+    if world == farmCatalog.world then return end
+    local memory = getSetting("MobFarm.ByWorld", {})
+    if farmCatalog.world then
+        memory[farmCatalog.world] = table.clone(S("MobFarm.Mobs"))
+    elseif memory[world] == nil then
+        memory[world] = table.clone(S("MobFarm.Mobs"))
+    end
+    farmCatalog.world = world
+    hubMain.target, hubMain.targetWorld, hubMain.rotation = nil, world, 0
+    farmCatalog.mobs.set(table.clone(memory[world] or {}), true)
+    setSetting("MobFarm.ByWorld", memory)
+end
 function farmCatalog.discover()
     local names, seen, order = {}, {}, {}
     local function add(name, index)
@@ -1526,6 +1726,7 @@ function farmCatalog.updateOptions(dropdown, key, options)
 end
 function farmCatalog.refreshMobs()
     if not farmCatalog.mobs then return end
+    farmCatalog.switchWorld(S("MobFarm.World"))
     local names = mobNames(S("MobFarm.World"))
     farmCatalog.updateOptions(farmCatalog.mobs, "MobFarm.Mobs", names)
     local selected = S("MobFarm.Mobs")
@@ -1540,6 +1741,7 @@ function farmCatalog.refreshMobs()
             allToggles["MobFarm.AutoFarm"].set(false)
         end
     end
+    farmCatalog.remember()
 end
 function farmCatalog.refresh()
     local worlds = farmCatalog.discover()
@@ -2034,6 +2236,86 @@ local function setEventPopupBlocked(value)
 end
 
 local cleanup
+function hubMain.number(value)
+    local ok, result = pcall(function() return Omni.Utils.Number:Format(value) end)
+    return ok and tostring(result) or tostring(math.floor(value))
+end
+function hubMain.eventTimer(activity)
+    local name = activity .. " " .. tostring(S(activity .. ".Difficulty"))
+    local info = Omni.Shared.Gamemodes.List[name]
+    if not info or type(info.OpenTimes) ~= "table" then return activity .. ": unavailable" end
+    local elapsed = workspace:GetServerTimeNow() % 3600
+    local wait = math.huge
+    for _, minute in pairs(info.OpenTimes) do
+        local since = (elapsed - minute * 60) % 3600
+        if since < (info.EnterTime or 60) then return activity .. ": entry open" end
+        wait = math.min(wait, 3600 - since)
+    end
+    return activity .. ": " .. (wait < math.huge and formatTime(wait) or "no schedule")
+end
+function hubMain.render()
+    if not hubMain.labels.activity then return end
+    hubMain.sample(Omni.Data)
+    local mode = currentGamemode()
+    local activity = "Idle"
+    if mode then
+        activity = mode
+        local family = activityOf(mode)
+        if family and statusLabels[family] then activity ..= "\n" .. statusLabels[family].Text end
+        pcall(function()
+            local hud = Omni.Interface.HUD.Gamemode
+            if hud.Visible then activity ..= "\nWave / rooms: " .. hud.Information.Wave.Value.Text end
+        end)
+    elseif busyBoss then
+        activity = busyBoss == worldBoss and ("World Boss\n" .. bossStatus(worldBoss)) or "Collecting lobby chests"
+    elseif S("MobFarm.AutoFarm") then
+        activity = "Mob Farm\n" .. statusLabels.MobFarm.Text
+    elseif S("Culling.Enabled") then
+        activity = "Culling\n" .. statusLabels.Culling.Text
+    elseif worldBoss.enabled then
+        activity = "World Boss\n" .. bossStatus(worldBoss)
+    end
+    hubMain.labels.activity.Text = "Activity: " .. activity
+    hubMain.labels.world.Text = "Current world: " .. tostring(Omni.Data.Maps and Omni.Data.Maps.Current or "Loading")
+    local target = hubMain.target
+    if not mode and busyBoss == worldBoss then
+        for _, enemy in ipairs(findEnemies(serverFolder("Enemies", "WorldBosses"), WORLD_BOSS_NAME)) do target = enemy; break end
+    elseif mode then
+        local state = env.FarmHubCulling
+        target = activityOf(mode) == "Culling" and state and state.target and state.target.object
+            or hubMain.combatTarget
+    elseif not S("MobFarm.AutoFarm") then
+        target = nil
+    end
+    local text = "Target: none"
+    if target and target.Parent and not target:GetAttribute("Died") and hubMain.health(target) > 0 then
+        local health = hubMain.health(target)
+        text = "Target: " .. tostring(target:GetAttribute("EnemyName"))
+            .. (health < math.huge and (" | HP: " .. hubMain.number(health)) or "")
+    end
+    hubMain.labels.target.Text = text
+    hubMain.labels.priority.Text = "Priority: " .. table.concat(S("Priority.Order") or {}, " > ")
+    local bossTimer = worldBoss.phase == "holding" and "World Boss: active"
+        or ("World Boss: " .. formatTime(INTERVAL - workspace:GetServerTimeNow() % INTERVAL))
+    hubMain.labels.events.Text = bossTimer .. "\n" .. hubMain.eventTimer("Dungeon") .. "\n" .. hubMain.eventTimer("Trial")
+    local active = {}
+    for key, toggle in pairs(allToggles) do
+        if settings[key] == true and (key:find("%.Auto") or key == "Culling.Enabled" or key == "Bosses.WorldBoss")
+            and not key:find("AutoLeave", 1, true) then active[#active + 1] = toggle.label or key end
+    end
+    table.sort(active)
+    hubMain.labels.active.Text = "Enabled features: " .. (#active > 0 and table.concat(active, ", ") or "none")
+    local session = hubMain.session
+    local elapsed = math.max(0, workspace:GetServerTimeNow() - session.start)
+    hubMain.labels.stats.Text = "Session time: " .. formatTime(elapsed)
+        .. "\nEnemies defeated: " .. hubMain.number(session.kills)
+        .. "\nDamage dealt: " .. hubMain.number(session.damage)
+        .. "\nRuns entered / ended: " .. session.entered .. " / " .. session.ended
+        .. "\nRewards confirmed: " .. session.rewards
+        .. "\nItems received: " .. hubMain.number(session.items)
+        .. "\nYen net change: " .. hubMain.number((tonumber(Omni.Data.Yen) or 0) - session.yenStart)
+    hubMain.updateLabel()
+end
 -- Tabs -------------------------------------------------------------------------------
 
 -- Built inside one function so the tab variables do not count against Luau's limit of 200
@@ -2042,6 +2324,29 @@ local cleanup
 local errorLabel
 local function buildTabs()
     local tab, section
+    -- Main
+    hubMain.tab = addTab("Main")
+    section = addSection(hubMain.tab, 1, "Activity Dashboard")
+    hubMain.labels.activity = addLabel(section, "Activity: loading...", COLORS.accent)
+    hubMain.labels.world = addLabel(section, "Current world: loading...", COLORS.text)
+    hubMain.labels.target = addLabel(section, "Target: none", COLORS.text)
+    hubMain.labels.priority = addLabel(section, "", COLORS.dim)
+    hubMain.labels.active = addLabel(section, "", COLORS.dim)
+    section = addSection(hubMain.tab, 1, "Next Events")
+    hubMain.labels.events = addLabel(section, "Loading timers...", COLORS.text)
+    section = addSection(hubMain.tab, 2, "Session Statistics")
+    hubMain.labels.stats = addLabel(section, "Starting session...", COLORS.text)
+    addLabel(section, "Counts confirmed changes since starting this hub. Runs ended include manual and automatic exits.", COLORS.dim)
+    addButton(section, "Reset Session Statistics", function()
+        hubMain.resetStats()
+        hubMain.render()
+    end)
+    section = addSection(hubMain.tab, 2, "Updates")
+    hubMain.labels.update = addLabel(section, "", COLORS.accent)
+    hubMain.updateLabel()
+    addButton(section, "Check for Updates", hubMain.checkUpdate)
+    addButton(section, "Reload from GitHub", hubMain.reload)
+    addLabel(section, "Reload saves your settings and replaces the old hub. Session statistics are retained.", COLORS.dim)
 
     -- Favorites (starred sections are moved here while this tab is open)
     favorites.tab = addTab("Favorites")
@@ -2068,12 +2373,15 @@ local function buildTabs()
     section = addSection(tab, 1, "Mob Farm")
     addToggle(section, "Auto Farm", "MobFarm.AutoFarm", false, W)
     statusLabels.MobFarm = addLabel(section, "Disabled", COLORS.accent)
-    addToggle(section, "Send fighters to closest", "MobFarm.SendToClosest", false, W)
+    addToggle(section, "Send fighters to target", "MobFarm.SendToClosest", false, W)
     farmCatalog.dropdowns["MobFarm.World"] = addDropdown(section, "World", "MobFarm.World", MAP_NAMES, "Heaven Island", function()
         farmCatalog.refreshMobs()
     end)
     farmCatalog.mobs = addDropdown(section, "Mobs (select multiple)", "MobFarm.Mobs",
-        mobNames(getSetting("MobFarm.World", "Heaven Island")), { "Hawk Eyes" }, W, true)
+        mobNames(getSetting("MobFarm.World", "Heaven Island")), { "Hawk Eyes" }, farmCatalog.remember, true)
+    addDropdown(section, "Targeting mode", "MobFarm.TargetMode",
+        {"Closest", "Lowest Health", "Bosses First", "Rotate Types"}, "Closest", W)
+    addToggle(section, "Finish current target before switching", "MobFarm.FinishTarget", true, W)
     addLabel(section, "Tick any mobs to farm. Targets the closest selected mob; untick to remove.", COLORS.dim)
     addSlider(section, "Distance from mob", "MobFarm.Offset", 0, 15, 3)
 
@@ -2344,6 +2652,8 @@ farmCatalog.refresh()
 local function startFeatures()
 
 every("Farming catalog", 5, farmCatalog.refresh)
+every("Main dashboard", 1, hubMain.render)
+hubMain.checkUpdate()
 
 -- Mob farm: stay next to the chosen mob in the chosen world.
 local lastFighterSend = 0
@@ -2371,12 +2681,18 @@ every("Mob Farm", 0.5, function()
 
     local selected = {}
     for _, name in ipairs(S("MobFarm.Mobs")) do selected[name] = true end
-    local target, distance, position = nearestTo(
-        findEnemies(serverFolder("Enemies", "Maps", world), selected), root.Position)
+    if hubMain.targetWorld ~= world then
+        hubMain.target, hubMain.targetWorld, hubMain.rotation = nil, world, 0
+    end
+    local target = hubMain.pick(findEnemies(serverFolder("Enemies", "Maps", world), selected), root.Position,
+        S("MobFarm.Mobs"), S("MobFarm.TargetMode"), S("MobFarm.FinishTarget"))
+    hubMain.target = target
     if not target then
         setStatus("MobFarm", "Waiting for selected mobs to spawn")
         return
     end
+    local position = enemyPosition(target)
+    local distance = (position - root.Position).Magnitude
 
     local offset = tonumber(S("MobFarm.Offset")) or 3
     if distance > offset + 5 then
@@ -2528,11 +2844,13 @@ every("Gamemode Combat", 0.4, function()
     local current = currentGamemode()
     local activity = current and activityOf(current)
     if not activity or activity == "Culling" then
+        hubMain.combatTarget = nil
         _combatNote = ""
         return 1
     end
     if not (activityManaged(activity)
         or (activity == "Culling" and S("Culling.TeleportToEnemies"))) then
+        hubMain.combatTarget = nil
         return 1
     end
     local root, humanoid = getRoot()
@@ -2559,6 +2877,7 @@ every("Gamemode Combat", 0.4, function()
     end
 
     local target, distance, position = nearestTo(#open > 0 and open or shielded, root.Position)
+    hubMain.combatTarget = target
     if not target or distance <= 8 then return nil end
     if S(activity .. ".WalkToEnemy") and humanoid then
         humanoid:MoveTo(position)
@@ -3777,8 +4096,8 @@ connect(RunService.Heartbeat, function(deltaTime)
     errorLabel.Text = lastError and ("Last error: " .. lastError) or "No worker errors"
 end)
 
--- Open on Favorites when there are any, otherwise on the first feature tab.
-selectTab(favorites.count() > 0 and tabs[1] or tabs[2])
+-- Main is the starting page; config loads return to Settings.
+selectTab(hubMain.tab)
 if importedSettings then
     for _, tab in ipairs(tabs) do
         if tab.name == "Settings" then selectTab(tab); break end
