@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.6"
+local SCRIPT_VERSION = "2026.10.12.7"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -229,6 +229,11 @@ function configStore.validate(document)
                         seen[name] = true
                     end
                 end
+            end
+            if key == "Bosses.ReturnSpot" and next(copied) then
+                assert(type(copied.map) == "string" and type(copied.cframe) == "table" and #copied.cframe == 12,
+                    "Invalid spawn point")
+                for i = 1, 12 do assert(type(copied.cframe[i]) == "number", "Invalid spawn coordinates") end
             end
             local limits = configStore.bounds[key]
             if limits then copied = math.clamp(math.floor(copied + 0.5), limits[1], limits[2]) end
@@ -1864,6 +1869,8 @@ local function bossStatus(boss)
     local now = os.clock()
     if boss.phase == "teleporting" then
         return "Entering map in: " .. formatTime(boss.teleportAt - now)
+    elseif boss.phase == "returning" then
+        return "Returning to your spawn point..."
     elseif boss.phase == "holding" then
         return boss.bossSeen and "Boss alive, farming paused" or "Looking for the boss..."
     elseif boss.phase == "dungeon" then
@@ -1989,6 +1996,70 @@ local function worldBossPresent()
     return false
 end
 
+local bossReturn = { label = nil }
+function bossReturn.capture()
+    if currentGamemode() then return nil end
+    local root = getRoot()
+    local map = Omni.Data.Maps and Omni.Data.Maps.Current
+    if not root or type(map) ~= "string" or not WORLD_MAPS[map] then return nil end
+    return {map = map, cframe = {root.CFrame:GetComponents()}}
+end
+function bossReturn.saved()
+    local spot = getSetting("Bosses.ReturnSpot", {})
+    if type(spot) ~= "table" or type(spot.map) ~= "string" or not WORLD_MAPS[spot.map]
+        or type(spot.cframe) ~= "table" or #spot.cframe ~= 12 then return nil end
+    for i = 1, 12 do
+        local n = spot.cframe[i]
+        if type(n) ~= "number" or n ~= n or math.abs(n) == math.huge then return nil end
+    end
+    return spot
+end
+function bossReturn.render()
+    if not bossReturn.label then return end
+    local spot = bossReturn.saved()
+    bossReturn.label.Text = spot and string.format("Spawn point: %s (%.1f, %.1f, %.1f)",
+        spot.map, spot.cframe[1], spot.cframe[2], spot.cframe[3])
+        or "No spawn point set. Set it while standing at your AFK spot."
+end
+function bossReturn.setHere()
+    local spot = bossReturn.capture()
+    if not spot then
+        notify("Set your spawn point outside a gamemode, with your character loaded.")
+        return false
+    end
+    setSetting("Bosses.ReturnSpot", spot)
+    bossReturn.render()
+    notify("Spawn point saved in " .. spot.map)
+    return true
+end
+function bossReturn.restore(boss)
+    if not S("Bosses.ReturnAfterBoss") then return false, "return disabled" end
+    local spot = bossReturn.saved() or boss.returnSpot
+    if not spot then return false, "no return point available" end
+    if not alive or not boss.enabled or currentGamemode() then return false, "another activity is active" end
+    boss.phase = "returning"
+    logAction("World Boss returning to spawn point: " .. spot.map)
+    if Omni.Data.Maps.Current ~= spot.map then requestMap(spot.map) end
+    local deadline = os.clock() + 10
+    while alive and boss.enabled and not currentGamemode() and os.clock() < deadline do
+        if Omni.Data.Maps.Current == spot.map and getRoot() then
+            if teleportTo(CFrame.new(unpack(spot.cframe))) then
+                logAction("World Boss returned to spawn point: " .. spot.map)
+                notify("Returned to your spawn point.")
+                boss.returnSpot = nil
+                return true
+            end
+        end
+        task.wait(0.1)
+    end
+    return false, currentGamemode() and "another activity took priority" or "map or character did not load"
+end
+-- Capture the current AFK position once when first adding this feature.
+if not bossReturn.saved() then
+    local spot = bossReturn.capture()
+    if spot then setSetting("Bosses.ReturnSpot", spot) end
+end
+
 local function runWorldBoss(boss)
     local handledHour = nil
     while alive and boss.enabled do
@@ -2027,6 +2098,7 @@ local function runWorldBoss(boss)
         logAction("World Boss dungeon wait complete; current gamemode: " .. tostring(currentGamemode()))
         if not acquireTeleport(boss) then return end
 
+        boss.returnSpot = boss.returnSpot or bossReturn.saved() or bossReturn.capture()
         local success, message = pcall(function()
             enterMap(boss)
             moveCharacter(boss, boss.destination)
@@ -2042,7 +2114,7 @@ local function runWorldBoss(boss)
         boss.bossSeen = false
         local holdStart = os.clock()
         local lastSeen = nil
-        while os.clock() - holdStart < WORLD_BOSS_MAX_HOLD do
+        while alive and boss.enabled and os.clock() - holdStart < WORLD_BOSS_MAX_HOLD do
             if worldBossPresent() then
                 if not boss.bossSeen then
                     notify("World boss found. Other teleports are paused.")
@@ -2068,6 +2140,15 @@ local function runWorldBoss(boss)
             task.wait(0.5)
         end
 
+        if alive and boss.enabled and not currentGamemode() and busyBoss == boss then
+            local ok, returned, reason = pcall(bossReturn.restore, boss)
+            if not ok then
+                lastError = "World Boss return: " .. tostring(returned)
+                logAction(lastError)
+            elseif not returned and S("Bosses.ReturnAfterBoss") then
+                logAction("World Boss return skipped: " .. tostring(reason))
+            end
+        end
         if busyBoss == boss then busyBoss = nil end
     end
 end
@@ -2412,6 +2493,13 @@ local function buildTabs()
         .. "(or about a minute after :00 if you did not join it), and pauses farming until "
         .. "the boss is dead.", COLORS.dim)
 
+    section = addSection(tab, 2, "Spawn Point")
+    addToggle(section, "Return after World Boss", "Bosses.ReturnAfterBoss", true, W)
+    bossReturn.label = addLabel(section, "", COLORS.accent)
+    bossReturn.render()
+    addButton(section, "Set Spawn Point to My Position", bossReturn.setHere)
+    addLabel(section, "Saves your world, position and facing direction. Returns here after the boss dies or the encounter times out.", COLORS.dim)
+
     section = addSection(tab, 1, "Safety")
     addToggle(section, "Pause bosses in dungeon/trial", "Bosses.PauseInGamemode", true, W)
 
@@ -2618,7 +2706,7 @@ local function buildTabs()
         for key, toggle in pairs(allToggles) do
             if settings[key] == true and string.sub(key, 1, 8) ~= "Session."
                 and string.sub(key, 1, 8) ~= "Webhook." and string.sub(key, 1, 9) ~= "Shop.Buy."
-                and key ~= "Bosses.PauseInGamemode" and key ~= "Priority.LeaveForPriority"
+                and key ~= "Bosses.PauseInGamemode" and key ~= "Bosses.ReturnAfterBoss" and key ~= "Priority.LeaveForPriority"
                 and key ~= "Culling.TeleportToEnemies" then
                 toggle.set(false)
             end
@@ -3297,7 +3385,8 @@ end
         end
         if worldBoss.enabled and priorityRank("World Boss") < priorityRank("Culling")
             and (busyBoss == worldBoss or worldBoss.phase == "gamemode" or worldBoss.phase == "queued"
-                or worldBoss.phase == "teleporting" or worldBoss.phase == "holding") then return "World Boss" end
+                or worldBoss.phase == "teleporting" or worldBoss.phase == "holding"
+                or worldBoss.phase == "returning") then return "World Boss" end
         return nil
     end
     local function wave(sessionId)
