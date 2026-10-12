@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.1"
+local SCRIPT_VERSION = "2026.10.12.2"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -1516,7 +1516,7 @@ function hubMain.resetStats()
         lastKills = tonumber(stats["Defeated Enemies"]) or hubMain.sum(data.Index and data.Index.Enemy),
         lastDamage = tonumber(stats["Damage Dealt"]) or 0,
         lastItems = hubMain.sum(data.Index and data.Index.Item),
-        yenStart = tonumber(data.Yen) or 0, seen = hubMain.claimed(data),
+        seen = hubMain.claimed(data),
         mode = data.Gamemode, sessionId = data.GamemodeSession}
     env.FarmHubSessionStats = hubMain.session
 end
@@ -2277,34 +2277,9 @@ function hubMain.render()
     end
     hubMain.labels.activity.Text = "Activity: " .. activity
     hubMain.labels.world.Text = "Current world: " .. tostring(Omni.Data.Maps and Omni.Data.Maps.Current or "Loading")
-    local target = hubMain.target
-    if not mode and busyBoss == worldBoss then
-        for _, enemy in ipairs(findEnemies(serverFolder("Enemies", "WorldBosses"), WORLD_BOSS_NAME)) do target = enemy; break end
-    elseif mode then
-        local state = env.FarmHubCulling
-        target = activityOf(mode) == "Culling" and state and state.target and state.target.object
-            or hubMain.combatTarget
-    elseif not S("MobFarm.AutoFarm") then
-        target = nil
-    end
-    local text = "Target: none"
-    if target and target.Parent and not target:GetAttribute("Died") and hubMain.health(target) > 0 then
-        local health = hubMain.health(target)
-        text = "Target: " .. tostring(target:GetAttribute("EnemyName"))
-            .. (health < math.huge and (" | HP: " .. hubMain.number(health)) or "")
-    end
-    hubMain.labels.target.Text = text
-    hubMain.labels.priority.Text = "Priority: " .. table.concat(S("Priority.Order") or {}, " > ")
     local bossTimer = worldBoss.phase == "holding" and "World Boss: active"
         or ("World Boss: " .. formatTime(INTERVAL - workspace:GetServerTimeNow() % INTERVAL))
     hubMain.labels.events.Text = bossTimer .. "\n" .. hubMain.eventTimer("Dungeon") .. "\n" .. hubMain.eventTimer("Trial")
-    local active = {}
-    for key, toggle in pairs(allToggles) do
-        if settings[key] == true and (key:find("%.Auto") or key == "Culling.Enabled" or key == "Bosses.WorldBoss")
-            and not key:find("AutoLeave", 1, true) then active[#active + 1] = toggle.label or key end
-    end
-    table.sort(active)
-    hubMain.labels.active.Text = "Enabled features: " .. (#active > 0 and table.concat(active, ", ") or "none")
     local session = hubMain.session
     local elapsed = math.max(0, workspace:GetServerTimeNow() - session.start)
     hubMain.labels.stats.Text = "Session time: " .. formatTime(elapsed)
@@ -2313,7 +2288,6 @@ function hubMain.render()
         .. "\nRuns entered / ended: " .. session.entered .. " / " .. session.ended
         .. "\nRewards confirmed: " .. session.rewards
         .. "\nItems received: " .. hubMain.number(session.items)
-        .. "\nYen net change: " .. hubMain.number((tonumber(Omni.Data.Yen) or 0) - session.yenStart)
     hubMain.updateLabel()
 end
 -- Tabs -------------------------------------------------------------------------------
@@ -2329,9 +2303,6 @@ local function buildTabs()
     section = addSection(hubMain.tab, 1, "Activity Dashboard")
     hubMain.labels.activity = addLabel(section, "Activity: loading...", COLORS.accent)
     hubMain.labels.world = addLabel(section, "Current world: loading...", COLORS.text)
-    hubMain.labels.target = addLabel(section, "Target: none", COLORS.text)
-    hubMain.labels.priority = addLabel(section, "", COLORS.dim)
-    hubMain.labels.active = addLabel(section, "", COLORS.dim)
     section = addSection(hubMain.tab, 1, "Next Events")
     hubMain.labels.events = addLabel(section, "Loading timers...", COLORS.text)
     section = addSection(hubMain.tab, 2, "Session Statistics")
