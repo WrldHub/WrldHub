@@ -348,6 +348,63 @@ do
     connect(minimize.Activated, function() setMinimized(window:GetAttribute("Minimized") ~= true) end)
 end
 
+-- Favorites: every section card has a star in its title. While the Favorites tab is open
+-- the starred cards are moved onto it whole, so every control in them works there; they go
+-- back to their own tab when another tab is opened.
+local favorites = { sections = {}, tab = nil, empty = nil }
+
+function favorites.saved()
+    local saved = settings["Favorites.Sections"]
+    if type(saved) ~= "table" then
+        saved = {}
+        settings["Favorites.Sections"] = saved
+    end
+    return saved
+end
+
+function favorites.count()
+    local count = 0
+    for _, entry in ipairs(favorites.sections) do
+        if favorites.saved()[entry.id] then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+function favorites.place()
+    local tab = favorites.tab
+    local showing = tab ~= nil and tab.page.Visible
+    local saved, count = favorites.saved(), 0
+    for _, entry in ipairs(favorites.sections) do
+        local on = saved[entry.id] == true
+        entry.star.TextColor3 = on and COLORS.star or COLORS.off
+        if on then
+            count = count + 1
+        end
+        entry.frame.Parent = (on and showing) and tab.columns[(count - 1) % 2 + 1] or entry.home
+    end
+    if favorites.empty then
+        favorites.empty.Visible = count == 0
+    end
+end
+
+function favorites.toggle(id)
+    local saved = favorites.saved()
+    saved[id] = not saved[id] or nil
+    setSetting("Favorites.Sections", saved)
+    favorites.place()
+end
+
+-- Toggles starred by the first version of Favorites now star the section they sit in.
+function favorites.adopt(section, key)
+    local old = settings["Favorites.List"]
+    local id = section:GetAttribute("FavoriteId")
+    if id and type(old) == "table" and table.find(old, key) then
+        favorites.saved()[id] = true
+    end
+end
+
 local tabs = {}
 local function selectTab(tab)
     for _, other in ipairs(tabs) do
@@ -358,6 +415,7 @@ local function selectTab(tab)
         other.marker.Visible = selected
     end
     tabTitle.Text = tab.name
+    favorites.place()
 end
 
 local function addTab(name)
@@ -438,7 +496,6 @@ local function addSection(tab, columnIndex, titleText)
         BackgroundColor3 = COLORS.card,
         BorderSizePixel = 0
     }, tab.columns[columnIndex])
-    section:SetAttribute("Title", titleText)
     round(section, 8)
     new("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, section)
     new("UIPadding", {
@@ -451,15 +508,38 @@ local function addSection(tab, columnIndex, titleText)
         SortOrder = Enum.SortOrder.LayoutOrder,
         Padding = UDim.new(0, 6)
     }, section)
-    new("TextLabel", {
+    local title = new("TextLabel", {
         Size = UDim2.new(1, 0, 0, 22),
         BackgroundTransparency = 1,
         Text = titleText,
         TextColor3 = COLORS.text,
         TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
         Font = FONTS.bold,
         TextSize = 15
     }, section)
+    if tab ~= favorites.tab then
+        local id = tab.name .. "/" .. titleText
+        section:SetAttribute("FavoriteId", id)
+        new("UIPadding", { PaddingRight = UDim.new(0, 26) }, title)
+        local star = new("TextButton", {
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, 26, 0.5, 0),
+            Size = UDim2.fromOffset(24, 24),
+            BackgroundTransparency = 1,
+            Text = "\u{2605}",
+            TextColor3 = COLORS.off,
+            Font = FONT,
+            TextSize = 16,
+            AutoButtonColor = false
+        }, title)
+        connect(star.Activated, function()
+            favorites.toggle(id)
+        end)
+        favorites.sections[#favorites.sections + 1] = {
+            id = id, frame = section, home = tab.columns[columnIndex], star = star
+        }
+    end
     return section
 end
 
@@ -490,37 +570,8 @@ local startup = {}
 
 -- A control with no onChange is saved but not wired to the game, so its text is dimmed.
 local allToggles = {}
--- Favorites: every toggle has a star. Starred toggles are copied onto the Favorites tab,
--- grouped under the name of the section they come from, and stay in sync with the original.
-local favorites = { meta = {}, stars = {}, mirrors = {}, tab = nil }
-
-function favorites.list()
-    local list = settings["Favorites.List"]
-    if type(list) ~= "table" then
-        list = {}
-        settings["Favorites.List"] = list
-    end
-    return list
-end
-
-function favorites.has(key)
-    return table.find(favorites.list(), key) ~= nil
-end
-
-function favorites.toggle(key)
-    local list = favorites.list()
-    local index = table.find(list, key)
-    if index then
-        table.remove(list, index)
-    else
-        list[#list + 1] = key
-    end
-    setSetting("Favorites.List", list)
-    favorites.render()
-end
-
--- The switch row shared by a toggle and its copy on the Favorites tab.
-function favorites.row(section, text, key, wired, mirror)
+local function addToggle(section, text, key, default, onChange)
+    favorites.adopt(section, key)
     local row = new("TextButton", {
         Size = UDim2.new(1, 0, 0, 24),
         BackgroundTransparency = 1,
@@ -528,32 +579,15 @@ function favorites.row(section, text, key, wired, mirror)
         AutoButtonColor = false
     }, section)
     new("TextLabel", {
-        Size = UDim2.new(1, -70, 1, 0),
+        Size = UDim2.new(1, -44, 1, 0),
         BackgroundTransparency = 1,
         Text = text,
-        TextColor3 = wired and COLORS.text or COLORS.dim,
+        TextColor3 = onChange and COLORS.text or COLORS.dim,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         Font = FONT,
         TextSize = TEXT_SIZE
     }, row)
-    local star = new("TextButton", {
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -40, 0.5, 0),
-        Size = UDim2.fromOffset(24, 24),
-        BackgroundTransparency = 1,
-        Text = "\u{2605}",
-        TextColor3 = (mirror or favorites.has(key)) and COLORS.star or COLORS.off,
-        Font = FONT,
-        TextSize = 16,
-        AutoButtonColor = false
-    }, row)
-    connect(star.Activated, function()
-        favorites.toggle(key)
-    end)
-    if not mirror then
-        favorites.stars[key] = star
-    end
     local track = new("Frame", {
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, 0, 0.5, 0),
@@ -568,68 +602,12 @@ function favorites.row(section, text, key, wired, mirror)
         BorderSizePixel = 0
     }, track)
     round(knob, 7)
-    return row, function()
-        local on = settings[key] == true
-        track.BackgroundColor3 = on and COLORS.accent or COLORS.off
-        knob.Position = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
-    end
-end
-
-function favorites.render()
-    for key, star in pairs(favorites.stars) do
-        star.TextColor3 = favorites.has(key) and COLORS.star or COLORS.off
-    end
-    local tab = favorites.tab
-    if not tab then return end
-    table.clear(favorites.mirrors)
-    for _, column in ipairs(tab.columns) do
-        for _, child in ipairs(column:GetChildren()) do
-            if child:IsA("GuiObject") then
-                child:Destroy()
-            end
-        end
-    end
-
-    local cards, count = {}, 0
-    for _, key in ipairs(favorites.list()) do
-        local meta = favorites.meta[key]
-        if meta then
-            local card = cards[meta.section]
-            if not card then
-                count = count + 1
-                card = addSection(tab, (count - 1) % 2 + 1, meta.section)
-                cards[meta.section] = card
-            end
-            local row, render = favorites.row(card, meta.text, key, meta.wired, true)
-            render()
-            favorites.mirrors[key] = render
-            connect(row.Activated, function()
-                local toggle = allToggles[key]
-                if toggle then
-                    toggle.set(not settings[key])
-                end
-            end)
-        end
-    end
-    if count == 0 then
-        addLabel(addSection(tab, 1, "No favorites yet"), "Click the star next to any feature on "
-            .. "another tab to pin it here. Click the star again to remove it.", COLORS.dim)
-    end
-end
-
-local function addToggle(section, text, key, default, onChange)
-    local row, renderRow = favorites.row(section, text, key, onChange ~= nil, false)
-    favorites.meta[key] = {
-        text = text,
-        section = section:GetAttribute("Title") or "Other",
-        wired = onChange ~= nil
-    }
 
     local toggle = {}
     local function render()
-        renderRow()
-        local mirror = favorites.mirrors[key]
-        if mirror then mirror() end
+        local on = settings[key] == true
+        track.BackgroundColor3 = on and COLORS.accent or COLORS.off
+        knob.Position = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
     end
     function toggle.set(value, silent)
         setSetting(key, value and true or false)
@@ -1954,8 +1932,11 @@ local errorLabel
 local function buildTabs()
     local tab, section
 
-    -- Favorites (filled by favorites.render once every toggle exists)
+    -- Favorites (starred sections are moved here while this tab is open)
     favorites.tab = addTab("Favorites")
+    favorites.empty = addSection(favorites.tab, 1, "No favorites yet")
+    addLabel(favorites.empty, "Click the star in the corner of any section on another tab to pin "
+        .. "the whole section here. Click the star again to remove it.", COLORS.dim)
 
     -- Bosses
     tab = addTab("Bosses")
@@ -2174,7 +2155,7 @@ local function buildTabs()
     addButton(section, "Unload Hub", function()
         cleanup(true)
     end)
-    favorites.render()
+    settings["Favorites.List"] = nil
 end
 buildTabs()
 farmCatalog.refresh()
@@ -3614,7 +3595,7 @@ connect(RunService.Heartbeat, function(deltaTime)
 end)
 
 -- Open on Favorites when there are any, otherwise on the first feature tab.
-selectTab(#favorites.list() > 0 and tabs[1] or tabs[2])
+selectTab(favorites.count() > 0 and tabs[1] or tabs[2])
 for _, callback in ipairs(startup) do
     callback()
 end
