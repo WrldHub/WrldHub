@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.7"
+local SCRIPT_VERSION = "2026.10.12.8"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -2540,6 +2540,7 @@ local function buildTabs()
 
     section = addSection(tab, 1, "Dungeon")
     addToggle(section, "Auto Dungeon", "Dungeon.AutoDungeon", false, W)
+    addLabel(section, "Fights enemies, approaches available doors and opens them after the room is cleared.", COLORS.dim)
     statusLabels.Dungeon = addLabel(section, "", COLORS.accent)
     addDropdown(section, "Difficulty", "Dungeon.Difficulty", DIFFICULTIES, "Easy", W)
     addToggle(section, "Walk to enemies (no teleport)", "Dungeon.WalkToEnemy", false, W)
@@ -2985,12 +2986,124 @@ end)
 
 -- In-run positioning: keep you on an enemy of your own run. A shielded boss cannot be hurt,
 -- so while one is shielded the minions are targeted first.
+-- Dungeon doors now require an explicit prompt interaction with two indices.
+local dungeonDoors = {session = nil, retryAt = setmetatable({}, {__mode = "k"}), emptySince = nil,
+    message = "Waiting for room data"}
+function dungeonDoors.owned(prompt, current, session, map)
+    local node, knownMap, knownSession = prompt, false, false
+    if map and prompt:IsDescendantOf(map) then knownMap = true end
+    while node and node ~= workspace do
+        local tag = node:GetAttribute("SessionID") or node:GetAttribute("GamemodeSession")
+        if tag ~= nil then
+            if tag ~= session then return false end
+            knownSession = true
+        end
+        local owner = node:GetAttribute("OwnerID")
+        if owner ~= nil and owner ~= player.UserId and not knownSession then return false end
+        if node.Name == session then knownSession = true end
+        if node.Name == current then knownMap = true end
+        node = node.Parent
+    end
+    return knownSession or knownMap
+end
+function dungeonDoors.candidates(current, session, root)
+    local client = workspace:FindFirstChild("Client")
+    local maps = client and client:FindFirstChild("Maps")
+    local map = maps and maps:FindFirstChild(current)
+    local rooms, cleared
+    if map then
+        pcall(function()
+            local state = Omni.Utils.StateManager.Get(map)
+            if state then
+                rooms = state:GetState("Rooms")
+                cleared = state:GetState("ClearedRooms")
+            end
+        end)
+    end
+    local candidates, seen = {}, {}
+    local function collect(folder)
+        if not folder then return end
+        for _, prompt in ipairs(folder:GetDescendants()) do
+            if prompt:IsA("ProximityPrompt") and prompt.Enabled and not seen[prompt] then
+                seen[prompt] = true
+                local part = prompt.Parent
+                local callback = prompt:GetAttribute("Callback") or prompt.Name
+                local parentCallback = part and (part:GetAttribute("Callback") or part.Name)
+                local room, child = prompt:GetAttribute("RoomIndex"), prompt:GetAttribute("ChildIndex")
+                if part and part:IsA("BasePart") and (callback == "Open Dungeon Door" or parentCallback == "Open Dungeon Door")
+                    and type(room) == "number" and type(child) == "number"
+                    and dungeonDoors.owned(prompt, current, session, map) then
+                    local roomInfo = type(rooms) == "table" and (rooms[tostring(room)] or rooms[room])
+                    local ready = type(cleared) ~= "table" or cleared[tostring(room)] == true or cleared[room] == true
+                        or (type(roomInfo) == "table" and roomInfo.Type == "Start")
+                    if ready and (type(rooms) ~= "table" or roomInfo) then
+                        candidates[#candidates + 1] = {prompt = prompt, part = part, room = room, child = child,
+                            distance = (root.Position - part.Position).Magnitude}
+                    end
+                end
+            end
+        end
+    end
+    collect(map)
+    collect(serverFolder("ProximityPrompts"))
+    table.sort(candidates, function(a, b) return a.distance < b.distance end)
+    return candidates
+end
+function dungeonDoors.step(current, session, root, humanoid)
+    if not S("Dungeon.AutoDungeon") or activityOf(current) ~= "Dungeon" or currentGamemode() ~= current then return end
+    if type(session) ~= "string" or session == "" or Omni.Data.GamemodeSession ~= session then
+        dungeonDoors.message = "Waiting for dungeon session"; return
+    end
+    if dungeonDoors.session ~= session then
+        dungeonDoors.session = session
+        dungeonDoors.retryAt = setmetatable({}, {__mode = "k"})
+        dungeonDoors.emptySince = nil
+    end
+    local now = os.clock()
+    dungeonDoors.emptySince = dungeonDoors.emptySince or now
+    if now - dungeonDoors.emptySince < 0.6 then dungeonDoors.message = "Waiting for room spawns"; return end
+    local wave = readWave()
+    if S("Dungeon.AutoLeave") and wave and wave >= (tonumber(S("Dungeon.Wave")) or math.huge) then
+        dungeonDoors.message = "Waiting to leave at selected wave"; return
+    end
+    local doors = dungeonDoors.candidates(current, session, root)
+    local door
+    for _, candidate in ipairs(doors) do
+        if now >= (dungeonDoors.retryAt[candidate.prompt] or 0) then door = candidate; break end
+    end
+    if not door then dungeonDoors.message = #doors > 0 and "Waiting for door confirmation" or "Waiting for an available door"; return end
+    if door.distance > math.max(1, door.prompt.MaxActivationDistance - 1) then
+        dungeonDoors.message = "Moving to dungeon door"
+        if S("Dungeon.WalkToEnemy") and humanoid then
+            humanoid:MoveTo(door.part.Position)
+        else
+            teleportTo(CFrame.new(door.part.Position + Vector3.new(0, 1, 0)))
+        end
+        return
+    end
+    if not alive or currentGamemode() ~= current or Omni.Data.GamemodeSession ~= session or not door.prompt.Enabled then return end
+    dungeonDoors.retryAt[door.prompt] = now + 2
+    dungeonDoors.message = "Opening dungeon door"
+    local ok, opened = pcall(invoke, "Gamemodes", "OpenDoor", door.room, door.child)
+    if not ok then
+        dungeonDoors.message = "Door request failed; retrying"
+        logAction("Dungeon door failed: " .. tostring(opened))
+    elseif opened == true then
+        dungeonDoors.message = "Door opened; waiting for enemies"
+        dungeonDoors.emptySince = now
+        logAction("Dungeon door opened: room " .. door.room .. ", door " .. door.child)
+    else
+        dungeonDoors.message = "Door not ready; retrying"
+    end
+end
+
 local _combatNote = ""
 every("Gamemode Combat", 0.4, function()
     local current = currentGamemode()
     local activity = current and activityOf(current)
     if not activity or activity == "Culling" then
         hubMain.combatTarget = nil
+        dungeonDoors.emptySince = nil
         _combatNote = ""
         return 1
     end
@@ -3007,7 +3120,7 @@ every("Gamemode Combat", 0.4, function()
     local hasSession = type(session) == "string" and session ~= ""
     local open, shielded = {}, {}
     for _, enemy in ipairs(findEnemies(serverFolder("Enemies", "Gamemodes"))) do
-        if not hasSession or enemy:GetAttribute("SessionID") == session then
+        if (not hasSession or enemy:GetAttribute("SessionID") == session) and hubMain.health(enemy) > 0 then
             if enemy:GetAttribute("Shielded") then
                 shielded[#shielded + 1] = enemy
             else
@@ -3024,7 +3137,16 @@ every("Gamemode Combat", 0.4, function()
 
     local target, distance, position = nearestTo(#open > 0 and open or shielded, root.Position)
     hubMain.combatTarget = target
-    if not target or distance <= 8 then return nil end
+    if not target then
+        if activity == "Dungeon" then
+            dungeonDoors.step(current, session, root, humanoid)
+            setStatus("Dungeon", "In " .. current .. " | " .. dungeonDoors.message)
+        end
+        return nil
+    end
+    dungeonDoors.emptySince = nil
+    if activity == "Dungeon" then setStatus("Dungeon", "In " .. current .. " | Fighting " .. tostring(target:GetAttribute("EnemyName"))) end
+    if distance <= 8 then return nil end
     if S(activity .. ".WalkToEnemy") and humanoid then
         humanoid:MoveTo(position)
     else
