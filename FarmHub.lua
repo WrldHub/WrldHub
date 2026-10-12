@@ -543,7 +543,7 @@ local function addButton(section, text, onClick)
 end
 
 local OPTION_HEIGHT = 26
-local function addDropdown(section, labelText, key, options, default, onChange)
+local function addDropdown(section, labelText, key, options, default, onChange, multiSelect)
     if labelText then
         addLabel(section, labelText, COLORS.dim)
     end
@@ -596,9 +596,34 @@ local function addDropdown(section, labelText, key, options, default, onChange)
     end
 
     local dropdown = {}
+    local function renderValue()
+        local selected = settings[key]
+        valueLabel.Text = multiSelect and (#selected > 0 and table.concat(selected, ", ") or "Select mobs...")
+            or tostring(selected)
+        if multiSelect then
+            for _, child in ipairs(list:GetChildren()) do
+                local option = child:GetAttribute("Option")
+                if child:IsA("TextButton") and option then
+                    local checked = table.find(selected, option) ~= nil
+                    child.Text = (checked and "   [x] " or "   [ ] ") .. option
+                    child.TextColor3 = checked and COLORS.accent or COLORS.text
+                end
+            end
+        end
+    end
     function dropdown.set(value, silent)
+        if multiSelect then
+            local values, seen = {}, {}
+            for _, name in ipairs(type(value) == "table" and value or { value }) do
+                if type(name) == "string" and name ~= "--" and not seen[name] then
+                    seen[name] = true
+                    values[#values + 1] = name
+                end
+            end
+            value = values
+        end
         setSetting(key, value)
-        valueLabel.Text = tostring(value)
+        renderValue()
         if onChange and not silent then
             onChange(value)
         end
@@ -622,18 +647,29 @@ local function addDropdown(section, labelText, key, options, default, onChange)
                 TextSize = TEXT_SIZE,
                 AutoButtonColor = false
             }, list)
+            optionButton:SetAttribute("Option", tostring(option))
             hover(optionButton, COLORS.box, COLORS.boxHover)
             connect(optionButton.Activated, function()
-                setOpen(false)
-                dropdown.set(option)
+                if multiSelect then
+                    local selected = table.clone(settings[key])
+                    local index = table.find(selected, option)
+                    if index then table.remove(selected, index) else selected[#selected + 1] = option end
+                    dropdown.set(selected)
+                else
+                    setOpen(false)
+                    dropdown.set(option)
+                end
             end)
         end
         list.Size = UDim2.new(1, 0, 0, math.min(#newOptions, 7) * OPTION_HEIGHT)
         list.CanvasSize = UDim2.fromOffset(0, #newOptions * OPTION_HEIGHT)
+        if multiSelect then renderValue() end
     end
 
+    getSetting(key, default)
+    if multiSelect then dropdown.set(settings[key], true) end
     dropdown.setOptions(options)
-    valueLabel.Text = tostring(getSetting(key, default))
+    renderValue()
     connect(button.Activated, function()
         setOpen(not list.Visible)
     end)
@@ -1075,7 +1111,8 @@ local function findEnemies(folder, enemyName)
     for _, inst in ipairs(folder:GetDescendants()) do
         if inst:IsA("BasePart") and inst:GetAttribute("EnemyID") ~= nil
             and not inst:GetAttribute("Died")
-            and (not enemyName or inst:GetAttribute("EnemyName") == enemyName) then
+            and (not enemyName or inst:GetAttribute("EnemyName") == enemyName
+                or (type(enemyName) == "table" and enemyName[inst:GetAttribute("EnemyName")])) then
             result[#result + 1] = inst
         end
     end
@@ -1268,12 +1305,18 @@ end
 function farmCatalog.refreshMobs()
     if not farmCatalog.mobs then return end
     local names = mobNames(S("MobFarm.World"))
-    local options = #names > 0 and names or { "--" }
-    farmCatalog.updateOptions(farmCatalog.mobs, "MobFarm.Mobs", options)
-    if not table.find(options, S("MobFarm.Mobs")) then
-        -- Do not silently move an active farm onto a different enemy after an update.
-        if allToggles["MobFarm.AutoFarm"] then allToggles["MobFarm.AutoFarm"].set(false) end
-        farmCatalog.mobs.set(options[1], true)
+    farmCatalog.updateOptions(farmCatalog.mobs, "MobFarm.Mobs", names)
+    local selected = S("MobFarm.Mobs")
+    local valid = {}
+    for _, name in ipairs(selected) do
+        if table.find(names, name) then valid[#valid + 1] = name end
+    end
+    if #valid ~= #selected then
+        -- Retain every valid selection; removed mobs never select unrelated targets.
+        farmCatalog.mobs.set(valid, true)
+        if #valid == 0 and allToggles["MobFarm.AutoFarm"] then
+            allToggles["MobFarm.AutoFarm"].set(false)
+        end
     end
 end
 function farmCatalog.refresh()
@@ -1887,8 +1930,9 @@ local function buildTabs()
     farmCatalog.dropdowns["MobFarm.World"] = addDropdown(section, "World", "MobFarm.World", MAP_NAMES, "Heaven Island", function()
         farmCatalog.refreshMobs()
     end)
-    farmCatalog.mobs = addDropdown(section, "Mob", "MobFarm.Mobs",
-        mobNames(getSetting("MobFarm.World", "Heaven Island")), "Hawk Eyes", W)
+    farmCatalog.mobs = addDropdown(section, "Mobs (select multiple)", "MobFarm.Mobs",
+        mobNames(getSetting("MobFarm.World", "Heaven Island")), { "Hawk Eyes" }, W, true)
+    addLabel(section, "Tick any mobs to farm. Targets the closest selected mob; untick to remove.", COLORS.dim)
     addSlider(section, "Distance from mob", "MobFarm.Offset", 0, 15, 3)
 
     section = addSection(tab, 1, "Summon")
@@ -2136,8 +2180,8 @@ every("Mob Farm", 0.5, function()
         setStatus("MobFarm", "Disabled")
         return
     end
-    if not WORLD_MAPS[S("MobFarm.World")] or S("MobFarm.Mobs") == "--" then
-        setStatus("MobFarm", "Waiting for worlds and mobs to load")
+    if not WORLD_MAPS[S("MobFarm.World")] or #S("MobFarm.Mobs") == 0 then
+        setStatus("MobFarm", "Select a world and at least one mob")
         return
     end
     if positionTaken() then
@@ -2153,11 +2197,12 @@ every("Mob Farm", 0.5, function()
     local root = getRoot()
     if not root then return end
 
-    local mob = S("MobFarm.Mobs")
+    local selected = {}
+    for _, name in ipairs(S("MobFarm.Mobs")) do selected[name] = true end
     local target, distance, position = nearestTo(
-        findEnemies(serverFolder("Enemies", "Maps", world), mob), root.Position)
+        findEnemies(serverFolder("Enemies", "Maps", world), selected), root.Position)
     if not target then
-        setStatus("MobFarm", "No " .. tostring(mob) .. " found")
+        setStatus("MobFarm", "Waiting for selected mobs to spawn")
         return
     end
 
@@ -2169,7 +2214,8 @@ every("Mob Farm", 0.5, function()
         lastFighterSend = os.clock()
         task.spawn(pcall, invoke, "Combat", "FighterAttack", target:GetAttribute("EnemyID"), equippedFighterIds())
     end
-    setStatus("MobFarm", "Farming " .. tostring(mob))
+    setStatus("MobFarm", "Farming " .. tostring(target:GetAttribute("EnemyName"))
+        .. " (" .. #S("MobFarm.Mobs") .. " selected)")
 end)
 
 -- Summon: stand at a star and open it on the game's own cooldown.
