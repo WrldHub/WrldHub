@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.2"
+local SCRIPT_VERSION = "2026.10.12.3"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -1486,6 +1486,58 @@ end
 -- The Maps folder is deliberately separate from Gamemodes and Training.
 local hubMain = { labels = {}, target = nil, targetWorld = nil, rotation = 0,
     updateBusy = false, updateText = "Checking GitHub...", updateSource = nil, newer = false }
+-- Live client performance. RenderStepped samples the actual rendered frame rate.
+hubMain.performance = {frames = 0, elapsed = 0, longest = 0, fps = nil, frameMs = nil,
+    stats = game:GetService("Stats"), capStatus = "Unlimited", originalCap = nil, capApplied = false}
+if type(getfpscap) == "function" then
+    local ok, cap = pcall(getfpscap)
+    if ok and type(cap) == "number" then hubMain.performance.originalCap = cap end
+end
+function hubMain.frame(delta)
+    if type(delta) ~= "number" or delta <= 0 or delta ~= delta or delta == math.huge then return end
+    local p = hubMain.performance
+    p.frames += 1
+    p.elapsed += delta
+    p.longest = math.max(p.longest, delta)
+    if p.elapsed >= 1 then
+        p.fps = math.floor(p.frames / p.elapsed + 0.5)
+        p.frameMs = p.elapsed * 1000 / p.frames
+        p.worstMs = p.longest * 1000
+        p.frames, p.elapsed, p.longest = 0, 0, 0
+    end
+end
+function hubMain.setFpsLimit(choice)
+    local cap = choice == "15" and 15 or choice == "60" and 60 or 0
+    local p = hubMain.performance
+    if type(setfpscap) ~= "function" then
+        p.capStatus = "FPS limiter is unavailable in this executor"
+    else
+        local ok, failure = pcall(setfpscap, cap)
+        if ok then p.capApplied = true end
+        p.capStatus = ok and ("FPS limit: " .. (cap == 0 and "Unlimited" or tostring(cap)))
+            or ("Could not set FPS limit: " .. tostring(failure))
+    end
+    if hubMain.labels.fpsSetting then hubMain.labels.fpsSetting.Text = p.capStatus end
+end
+function hubMain.renderPerformance()
+    if not hubMain.labels.performance then return end
+    local p = hubMain.performance
+    local pingOk, ping = pcall(function()
+        return p.stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    local memoryOk, memory = pcall(p.stats.GetTotalMemoryUsageMb, p.stats)
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize
+    hubMain.labels.performance.Text = "FPS: " .. (p.fps and tostring(p.fps) or "sampling...")
+        .. "\nFrame time: " .. (p.frameMs and string.format("%.1f ms", p.frameMs) or "sampling...")
+        .. "\nLongest frame: " .. (p.worstMs and string.format("%.1f ms", p.worstMs) or "sampling...")
+        .. "\nPing: " .. (pingOk and type(ping) == "number" and string.format("%.0f ms", ping) or "unavailable")
+        .. "\nClient memory: " .. (memoryOk and type(memory) == "number" and string.format("%.0f MB", memory) or "unavailable")
+        .. "\nPlayers: " .. #Players:GetPlayers() .. " / " .. Players.MaxPlayers
+        .. "\nWindow: " .. (viewport and (math.floor(viewport.X) .. " x " .. math.floor(viewport.Y)) or "unavailable")
+        .. "\n" .. p.capStatus
+end
+
 function hubMain.sum(values)
     local total = 0
     for _, value in pairs(values or {}) do if type(value) == "number" then total += value end end
@@ -2288,6 +2340,7 @@ function hubMain.render()
         .. "\nRuns entered / ended: " .. session.entered .. " / " .. session.ended
         .. "\nRewards confirmed: " .. session.rewards
         .. "\nItems received: " .. hubMain.number(session.items)
+    hubMain.renderPerformance()
     hubMain.updateLabel()
 end
 -- Tabs -------------------------------------------------------------------------------
@@ -2305,6 +2358,8 @@ local function buildTabs()
     hubMain.labels.world = addLabel(section, "Current world: loading...", COLORS.text)
     section = addSection(hubMain.tab, 1, "Next Events")
     hubMain.labels.events = addLabel(section, "Loading timers...", COLORS.text)
+    section = addSection(hubMain.tab, 1, "Stats")
+    hubMain.labels.performance = addLabel(section, "Measuring performance...", COLORS.text)
     section = addSection(hubMain.tab, 2, "Session Statistics")
     hubMain.labels.stats = addLabel(section, "Starting session...", COLORS.text)
     addLabel(section, "Counts confirmed changes since starting this hub. Runs ended include manual and automatic exits.", COLORS.dim)
@@ -2514,6 +2569,11 @@ local function buildTabs()
     -- Settings
     tab = addTab("Settings")
     section = addSection(tab, 1, "Session")
+    local fpsDefault = hubMain.performance.originalCap == 15 and "15"
+        or hubMain.performance.originalCap == 60 and "60" or "Unlimited"
+    addDropdown(section, "FPS limit", "Session.FpsLimit", {"15", "60", "Unlimited"}, fpsDefault, hubMain.setFpsLimit)
+    hubMain.labels.fpsSetting = addLabel(section, "", COLORS.dim)
+    hubMain.setFpsLimit(getSetting("Session.FpsLimit", fpsDefault))
     addToggle(section, "Anti AFK", "Session.AntiAfk", true, setAntiAfk)
     addDropdown(section, "Anti AFK method (every minute)", "Session.AntiAfkMethod",
         { "Click + Jump", "Click", "Jump" }, "Click + Jump", W)
@@ -2623,6 +2683,7 @@ farmCatalog.refresh()
 local function startFeatures()
 
 every("Farming catalog", 5, farmCatalog.refresh)
+connect(RunService.RenderStepped, hubMain.frame)
 every("Main dashboard", 1, hubMain.render)
 hubMain.checkUpdate()
 
@@ -4004,6 +4065,9 @@ end
 cleanup = function(removeGui)
     if cleanedUp then return end
     cleanedUp = true
+    if hubMain.performance.capApplied and hubMain.performance.originalCap ~= nil and type(setfpscap) == "function" then
+        pcall(setfpscap, hubMain.performance.originalCap)
+    end
     if env.FarmHubCulling then env.FarmHubCulling.token += 1; env.FarmHubCulling = nil end
     env.FarmHubCullingPlayerSlider = nil
     saveSettings()
