@@ -1,4 +1,16 @@
 -- Wrld Hub: standalone Roblox client script. Run this entire file together.
+-- Only start in the supported Roblox place.
+if game.PlaceId ~= 106198175232796 then
+    local message = "This script only works in FarmHub's supported game."
+    warn("[FastHub] " .. message)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Wrong game", Text = message, Duration = 6
+        })
+    end)
+    return
+end
+
 -- Features call the game's own client module, so they send the same requests its UI sends.
 -- The few controls with dimmed text are saved but not wired to the game.
 -- Right Shift hides/shows the window by default; change the key in Settings.
