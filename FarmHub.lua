@@ -1,4 +1,4 @@
--- Farm Hub: standalone Roblox client script. Run this entire file together.
+-- Wrld Hub: standalone Roblox client script. Run this entire file together.
 -- Features call the game's own client module, so they send the same requests its UI sends.
 -- The few controls with dimmed text are saved but not wired to the game.
 -- Right Shift hides/shows the window by default; change the key in Settings.
@@ -159,6 +159,7 @@ local COLORS = {
     boxHover = Color3.fromRGB(54, 56, 68),
     off = Color3.fromRGB(68, 70, 82),
     accent = Color3.fromRGB(138, 99, 210),
+    star = Color3.fromRGB(245, 196, 66),
     text = Color3.fromRGB(232, 234, 240),
     dim = Color3.fromRGB(150, 155, 172)
 }
@@ -246,7 +247,7 @@ do
         Position = UDim2.fromOffset(16, 14),
         Size = UDim2.new(1, -32, 0, 22),
         BackgroundTransparency = 1,
-        Text = "Farm Hub",
+        Text = "Wrld Hub",
         TextColor3 = COLORS.text,
         TextXAlignment = Enum.TextXAlignment.Left,
         Font = FONTS.bold,
@@ -327,7 +328,7 @@ do
             end
             window.Size = UDim2.fromOffset(280, 46)
             titleBar.Position, titleBar.Size = UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1)
-            tabTitle.Text = "Farm Hub"
+            tabTitle.Text = "Wrld Hub"
         else
             local expanded = window:GetAttribute("ExpandedSize") or Vector2.new(880, 560)
             window.Size = UDim2.fromOffset(expanded.X, expanded.Y)
@@ -361,7 +362,7 @@ end
 
 local function addTab(name)
     local button = new("TextButton", {
-        Size = UDim2.new(1, 0, 0, 34),
+        Size = UDim2.new(1, 0, 0, 32),
         BackgroundColor3 = COLORS.card,
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
@@ -370,7 +371,7 @@ local function addTab(name)
     }, navList)
     round(button, 6)
     local marker = new("Frame", {
-        Position = UDim2.fromOffset(0, 8),
+        Position = UDim2.fromOffset(0, 7),
         Size = UDim2.fromOffset(3, 18),
         BackgroundColor3 = COLORS.accent,
         BorderSizePixel = 0,
@@ -437,6 +438,7 @@ local function addSection(tab, columnIndex, titleText)
         BackgroundColor3 = COLORS.card,
         BorderSizePixel = 0
     }, tab.columns[columnIndex])
+    section:SetAttribute("Title", titleText)
     round(section, 8)
     new("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, section)
     new("UIPadding", {
@@ -488,7 +490,37 @@ local startup = {}
 
 -- A control with no onChange is saved but not wired to the game, so its text is dimmed.
 local allToggles = {}
-local function addToggle(section, text, key, default, onChange)
+-- Favorites: every toggle has a star. Starred toggles are copied onto the Favorites tab,
+-- grouped under the name of the section they come from, and stay in sync with the original.
+local favorites = { meta = {}, stars = {}, mirrors = {}, tab = nil }
+
+function favorites.list()
+    local list = settings["Favorites.List"]
+    if type(list) ~= "table" then
+        list = {}
+        settings["Favorites.List"] = list
+    end
+    return list
+end
+
+function favorites.has(key)
+    return table.find(favorites.list(), key) ~= nil
+end
+
+function favorites.toggle(key)
+    local list = favorites.list()
+    local index = table.find(list, key)
+    if index then
+        table.remove(list, index)
+    else
+        list[#list + 1] = key
+    end
+    setSetting("Favorites.List", list)
+    favorites.render()
+end
+
+-- The switch row shared by a toggle and its copy on the Favorites tab.
+function favorites.row(section, text, key, wired, mirror)
     local row = new("TextButton", {
         Size = UDim2.new(1, 0, 0, 24),
         BackgroundTransparency = 1,
@@ -496,15 +528,32 @@ local function addToggle(section, text, key, default, onChange)
         AutoButtonColor = false
     }, section)
     new("TextLabel", {
-        Size = UDim2.new(1, -44, 1, 0),
+        Size = UDim2.new(1, -70, 1, 0),
         BackgroundTransparency = 1,
         Text = text,
-        TextColor3 = onChange and COLORS.text or COLORS.dim,
+        TextColor3 = wired and COLORS.text or COLORS.dim,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         Font = FONT,
         TextSize = TEXT_SIZE
     }, row)
+    local star = new("TextButton", {
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -40, 0.5, 0),
+        Size = UDim2.fromOffset(24, 24),
+        BackgroundTransparency = 1,
+        Text = "\u{2605}",
+        TextColor3 = (mirror or favorites.has(key)) and COLORS.star or COLORS.off,
+        Font = FONT,
+        TextSize = 16,
+        AutoButtonColor = false
+    }, row)
+    connect(star.Activated, function()
+        favorites.toggle(key)
+    end)
+    if not mirror then
+        favorites.stars[key] = star
+    end
     local track = new("Frame", {
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, 0, 0.5, 0),
@@ -519,12 +568,68 @@ local function addToggle(section, text, key, default, onChange)
         BorderSizePixel = 0
     }, track)
     round(knob, 7)
-
-    local toggle = {}
-    local function render()
+    return row, function()
         local on = settings[key] == true
         track.BackgroundColor3 = on and COLORS.accent or COLORS.off
         knob.Position = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+    end
+end
+
+function favorites.render()
+    for key, star in pairs(favorites.stars) do
+        star.TextColor3 = favorites.has(key) and COLORS.star or COLORS.off
+    end
+    local tab = favorites.tab
+    if not tab then return end
+    table.clear(favorites.mirrors)
+    for _, column in ipairs(tab.columns) do
+        for _, child in ipairs(column:GetChildren()) do
+            if child:IsA("GuiObject") then
+                child:Destroy()
+            end
+        end
+    end
+
+    local cards, count = {}, 0
+    for _, key in ipairs(favorites.list()) do
+        local meta = favorites.meta[key]
+        if meta then
+            local card = cards[meta.section]
+            if not card then
+                count = count + 1
+                card = addSection(tab, (count - 1) % 2 + 1, meta.section)
+                cards[meta.section] = card
+            end
+            local row, render = favorites.row(card, meta.text, key, meta.wired, true)
+            render()
+            favorites.mirrors[key] = render
+            connect(row.Activated, function()
+                local toggle = allToggles[key]
+                if toggle then
+                    toggle.set(not settings[key])
+                end
+            end)
+        end
+    end
+    if count == 0 then
+        addLabel(addSection(tab, 1, "No favorites yet"), "Click the star next to any feature on "
+            .. "another tab to pin it here. Click the star again to remove it.", COLORS.dim)
+    end
+end
+
+local function addToggle(section, text, key, default, onChange)
+    local row, renderRow = favorites.row(section, text, key, onChange ~= nil, false)
+    favorites.meta[key] = {
+        text = text,
+        section = section:GetAttribute("Title") or "Other",
+        wired = onChange ~= nil
+    }
+
+    local toggle = {}
+    local function render()
+        renderRow()
+        local mirror = favorites.mirrors[key]
+        if mirror then mirror() end
     end
     function toggle.set(value, silent)
         setSetting(key, value and true or false)
@@ -1012,7 +1117,7 @@ local function notify(text)
     if not S("Session.Notifications") then return end
     pcall(function()
         StarterGui:SetCore("SendNotification", {
-            Title = "Farm Hub",
+            Title = "Wrld Hub",
             Text = text,
             Duration = 6
         })
@@ -1064,7 +1169,7 @@ local function sendWebhook(text, ping)
         Method = "POST",
         Headers = { ["Content-Type"] = "application/json" },
         Body = HttpService:JSONEncode({
-            username = "Farm Hub",
+            username = "Wrld Hub",
             content = mention .. text,
             allowed_mentions = allowed
         })
@@ -1849,6 +1954,9 @@ local errorLabel
 local function buildTabs()
     local tab, section
 
+    -- Favorites (filled by favorites.render once every toggle exists)
+    favorites.tab = addTab("Favorites")
+
     -- Bosses
     tab = addTab("Bosses")
     section = addSection(tab, 1, "World Boss")
@@ -2020,7 +2128,7 @@ local function buildTabs()
     addButton(section, "Send Test Message", function()
         testLabel.Text = "Sending..."
         task.spawn(function()
-            local ok, reason = sendWebhook("Test message from Farm Hub for **" .. player.Name .. "**.", true)
+            local ok, reason = sendWebhook("Test message from Wrld Hub for **" .. player.Name .. "**.", true)
             testLabel.Text = ok and "Test sent. Check your Discord channel." or tostring(reason)
         end)
     end)
@@ -2066,6 +2174,7 @@ local function buildTabs()
     addButton(section, "Unload Hub", function()
         cleanup(true)
     end)
+    favorites.render()
 end
 buildTabs()
 farmCatalog.refresh()
@@ -3504,7 +3613,8 @@ connect(RunService.Heartbeat, function(deltaTime)
     errorLabel.Text = lastError and ("Last error: " .. lastError) or "No worker errors"
 end)
 
-selectTab(tabs[1])
+-- Open on Favorites when there are any, otherwise on the first feature tab.
+selectTab(#favorites.list() > 0 and tabs[1] or tabs[2])
 for _, callback in ipairs(startup) do
     callback()
 end
