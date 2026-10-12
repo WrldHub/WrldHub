@@ -1515,20 +1515,11 @@ local function getCharacter(boss)
     return nil, nil
 end
 
--- You are in a gamemode when the game's own data says so, or when a non-world map has a
--- populated folder in Workspace.Server.Teleport.
+-- Teleport markers can outlive a run or belong to a party lobby. Only the game's
+-- current gamemode proves that this player is still in a dungeon/trial.
 local function inGamemode()
     if not settings["Bosses.PauseInGamemode"] then return false end
-    if currentGamemode() then return true end
-
-    local teleports = serverFolder("Teleport")
-    if not teleports then return false end
-    for _, folder in ipairs(teleports:GetChildren()) do
-        if not WORLD_MAPS[folder.Name] and #folder:GetChildren() > 0 then
-            return true
-        end
-    end
-    return false
+    return currentGamemode() ~= nil
 end
 
 local lastPriorityLeave = 0
@@ -1573,6 +1564,7 @@ end
 local function enterMap(boss)
     boss.phase = "teleporting"
     boss.teleportAt = os.clock() + TELEPORT_DELAY
+    logAction(boss.name .. " teleport requested: " .. boss.map)
     requestMap(boss.map)
 end
 
@@ -1627,6 +1619,7 @@ local function runWorldBoss(boss)
         -- Go once the :00 dungeon is done: wait while its entry may still be open and
         -- while you are inside it. If you never joined, go when the entry closes.
         boss.phase = "dungeon"
+        logAction("World Boss waiting for dungeon exit / entry window to close")
         local wasInDungeon = false
         while alive and boss.enabled do
             local gamemode = currentGamemode()
@@ -1640,11 +1633,13 @@ local function runWorldBoss(boss)
         if wasInDungeon then
             task.wait(GAMEMODE_EXIT_DELAY)
         end
+        logAction("World Boss dungeon wait complete; current gamemode: " .. tostring(currentGamemode()))
         if not acquireTeleport(boss) then return end
 
         local success, message = pcall(function()
             enterMap(boss)
             moveCharacter(boss, boss.destination)
+            logAction("World Boss teleport completed: " .. tostring(boss.destination.Position))
         end)
         if not success then
             failBoss(boss, message)
