@@ -4,6 +4,8 @@
 -- Right Shift hides/shows the window by default; change the key in Settings.
 -- Settings > Unload stops everything and removes it.
 
+local launchFarmHub
+launchFarmHub = function(importedSettings)
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -60,6 +62,9 @@ end
 
 local settings: {[string]: any} = {}
 do
+    if importedSettings then
+        settings = importedSettings
+    else
     local ok, raw = pcall(function()
         return readfile(SAVE_FILE)
     end)
@@ -70,6 +75,7 @@ do
         if decoded and type(data) == "table" then
             settings = data
         end
+    end
     end
 end
 
@@ -155,6 +161,114 @@ end
 menuKey.set(getSetting("Session.MenuKey", "RightShift"))
 
 -- UI toolkit -------------------------------------------------------------------------
+
+-- Named profiles stay in this Potassium workspace, scoped to the Roblox account.
+local configStore = { file = "FarmHub_configs_" .. player.UserId .. ".json", profiles = {}, bounds = {}, options = {} }
+function configStore.copy(value, depth)
+    depth = depth or 0
+    if depth > 4 then error("Config nesting is too deep") end
+    if type(value) == "table" then
+        local result, count = {}, 0
+        for key, item in pairs(value) do
+            count = count + 1
+            if count > 256 or (type(key) ~= "string" and type(key) ~= "number") then error("Invalid config table") end
+            result[key] = configStore.copy(item, depth + 1)
+        end
+        return result
+    end
+    if type(value) == "number" then
+        if value ~= value or math.abs(value) == math.huge then error("Invalid number in config") end
+    elseif type(value) ~= "string" and type(value) ~= "boolean" then
+        error("Unsupported value in config")
+    end
+    return value
+end
+function configStore.name(value)
+    local name = type(value) == "string" and value:match("^%s*(.-)%s*$") or ""
+    assert(#name > 0 and #name <= 48 and not name:find("%c"), "Use a config name with 1-48 characters")
+    return name
+end
+function configStore.snapshot(shared)
+    local values = {}
+    for key, value in pairs(settings) do
+        if type(key) == "string" and key:sub(1, 8) ~= "Configs."
+            and key:sub(1, 1) ~= "_" and (not shared or key:sub(1, 8) ~= "Webhook.") then
+            values[key] = configStore.copy(value)
+        end
+    end
+    return values
+end
+function configStore.validate(document)
+    assert(type(document) == "table" and document.format == "FarmHubConfig" and document.version == 1,
+        "Paste a FarmHub shared config (version 1)")
+    assert(type(document.settings) == "table", "Config settings are missing")
+    local values, recognized = {}, 0
+    for key, value in pairs(document.settings) do
+        if type(key) == "string" and key:sub(1, 8) ~= "Configs." and key:sub(1, 1) ~= "_" and settings[key] ~= nil then
+            assert(type(value) == type(settings[key]), "Wrong value type for " .. key)
+            local copied = configStore.copy(value)
+            if key == "MobFarm.Mobs" or key == "Priority.Order" or key == "LevelUpgrades.Order" then
+                local seen = {}
+                assert(#copied <= 128, "Too many selections")
+                for index, name in pairs(copied) do
+                    assert(type(index) == "number" and index >= 1 and index <= #copied
+                        and type(name) == "string" and not seen[name], "Invalid selections for " .. key)
+                    seen[name] = true
+                end
+            end
+            local limits = configStore.bounds[key]
+            if limits then copied = math.clamp(math.floor(copied + 0.5), limits[1], limits[2]) end
+            local options = configStore.options[key]
+            if type(copied) == "string" and options then
+                assert(table.find(options, copied), "Unavailable option for " .. key .. ": " .. copied)
+            end
+            values[key] = copied
+            recognized = recognized + 1
+        end
+    end
+    assert(recognized > 0, "No supported settings in this config")
+    return values
+end
+function configStore.document(name, shared)
+    return { format = "FarmHubConfig", version = 1, name = name, settings = configStore.snapshot(shared) }
+end
+function configStore.persist(profiles)
+    writefile(configStore.file, HttpService:JSONEncode({version = 1, profiles = profiles}))
+    configStore.profiles = profiles
+end
+function configStore.save(name, document)
+    name = configStore.name(name)
+    configStore.validate(document)
+    local profiles = table.clone(configStore.profiles)
+    profiles[name] = document
+    configStore.persist(profiles)
+    return name
+end
+function configStore.import(raw, name)
+    assert(type(raw) == "string" and #raw <= 100000, "Config text is too large")
+    local document = HttpService:JSONDecode(raw)
+    local values = configStore.validate(document)
+    name = configStore.name(name ~= "" and name or document.name)
+    configStore.save(name, {format = "FarmHubConfig", version = 1, name = name, settings = values})
+    return name
+end
+function configStore.names()
+    local names = {}
+    for name in pairs(configStore.profiles) do names[#names + 1] = name end
+    table.sort(names)
+    return #names > 0 and names or {"--"}
+end
+do
+    local ok, raw = pcall(readfile, configStore.file)
+    if ok then
+        local decoded, library = pcall(HttpService.JSONDecode, HttpService, raw)
+        if decoded and type(library) == "table" and library.version == 1 and type(library.profiles) == "table" then
+            for name, document in pairs(library.profiles) do
+                if type(name) == "string" and type(document) == "table" then configStore.profiles[name] = document end
+            end
+        end
+    end
+end
 
 local COLORS = {
     window = Color3.fromRGB(22, 23, 28),
@@ -743,6 +857,7 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
         end
     end
     function dropdown.setOptions(newOptions)
+        configStore.options[key] = table.clone(newOptions)
         for _, child in ipairs(list:GetChildren()) do
             if child:IsA("TextButton") then
                 child:Destroy()
@@ -791,6 +906,7 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
 end
 
 local function addSlider(section, labelText, key, minValue, maxValue, default)
+    configStore.bounds[key] = {minValue, maxValue}
     local header = new("Frame", {
         Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1
@@ -2151,6 +2267,71 @@ local function buildTabs()
     addButton(section, "Unload Hub", function()
         cleanup(true)
     end)
+    section = addSection(tab, 2, "Configs")
+    do
+        local nameBox = addEntryBox(section, "Config name", "", "e.g. Boss farming")
+        local savedDropdown = addDropdown(section, "Saved configs", "Configs.Selected",
+            configStore.names(), "--", W)
+        local textBox = addEntryBox(section, "Share / import text", "", "Paste a shared FarmHub config here")
+        textBox.Size = UDim2.new(1, 0, 0, 90)
+        textBox.MultiLine = true
+        textBox.TextWrapped = true
+        textBox.TextYAlignment = Enum.TextYAlignment.Top
+        local status = addLabel(section, "Named configs are saved locally for this Roblox account.", COLORS.dim)
+        local function run(action)
+            local ok, result = pcall(action)
+            status.Text = ok and result or ("Config: " .. tostring(result))
+            status.TextColor3 = ok and COLORS.accent or COLORS.dim
+        end
+        local function selectSaved(name)
+            savedDropdown.setOptions(configStore.names())
+            savedDropdown.set(name, true)
+            nameBox.Text = name
+        end
+        addButton(section, "Save Config", function()
+            run(function()
+                local name = configStore.name(nameBox.Text)
+                configStore.save(name, configStore.document(name, false))
+                selectSaved(name)
+                return "Saved " .. name
+            end)
+        end)
+        addButton(section, "Load Config", function()
+            run(function()
+                local name = settings["Configs.Selected"]
+                local document = assert(configStore.profiles[name], "Select a saved config first")
+                local values = configStore.validate(document)
+                local merged = configStore.copy(settings)
+                for key, value in pairs(values) do merged[key] = value end
+                merged["Configs.Selected"] = name
+                task.defer(function()
+                    cleanup(true)
+                    launchFarmHub(merged)
+                end)
+                return "Loading " .. name
+            end)
+        end)
+        addButton(section, "Share Config", function()
+            run(function()
+                local name = nameBox.Text:match("^%s*(.-)%s*$")
+                if name == "" then name = "Shared config" end
+                name = configStore.name(name)
+                local raw = HttpService:JSONEncode(configStore.document(name, true))
+                textBox.Text = raw
+                local copied = type(setclipboard) == "function" and pcall(setclipboard, raw)
+                return copied and "Current config copied. Webhook settings excluded."
+                    or "Current config is in the text box; copy it to share. Webhook settings excluded."
+            end)
+        end)
+        addButton(section, "Import Config", function()
+            run(function()
+                local name = configStore.import(textBox.Text, nameBox.Text:match("^%s*(.-)%s*$"))
+                selectSaved(name)
+                return "Imported " .. name .. ". Click Load Config to apply it."
+            end)
+        end)
+        addLabel(section, "Share exports your current settings. Import saves a named config; Load applies it.", COLORS.dim)
+    end
     settings["Favorites.List"] = nil
 end
 buildTabs()
@@ -3598,7 +3779,14 @@ end)
 
 -- Open on Favorites when there are any, otherwise on the first feature tab.
 selectTab(favorites.count() > 0 and tabs[1] or tabs[2])
+if importedSettings then
+    for _, tab in ipairs(tabs) do
+        if tab.name == "Settings" then selectTab(tab); break end
+    end
+end
 for _, callback in ipairs(startup) do
     callback()
 end
 saveSettings()
+end
+launchFarmHub()
