@@ -1,4 +1,16 @@
 -- FastHub: Tycoon, but one dropper! Uses the FarmHub menu template.
+-- Only start in the supported Roblox place.
+if game.PlaceId ~= 109949693269081 then
+    local message = "This script only works in Tycoon, but one dropper!."
+    warn("[FastHub] " .. message)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Wrong game", Text = message, Duration = 6
+        })
+    end)
+    return
+end
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
