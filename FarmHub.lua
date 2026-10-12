@@ -27,14 +27,8 @@ local FARM_STEP_INTERVAL = 2          -- seconds between re-pins to the farm spo
 local _COMMANDMENT_INTERVAL = 5
 local SAVE_FILE = "FarmHub_settings.json"
 -- Any other map with an active teleport folder counts as a dungeon/trial/gamemode.
-local WORLD_MAPS = {
-    ["Heaven Island"] = true,
-    ["Slayers Village"] = true,
-    ["Cursed Academy"] = true,
-    ["Sins Kingdom"] = true,
-    ["Lobby"] = true
-}
-local MAP_NAMES = { "Heaven Island", "Slayers Village", "Cursed Academy", "Sins Kingdom" }
+local WORLD_MAPS = { ["Lobby"] = true }
+local MAP_NAMES = {} -- Filled from the game's catalog before the UI is built.
 local COMMANDMENTS = {
     "Love", "Truth", "Pacifism", "Patience", "Piety",
     "Purity", "Repose", "Reticence", "Selflessness", "Faith"
@@ -1204,17 +1198,104 @@ local function mobNames(world)
         end
     end
     pcall(function()
-        for key, info in pairs(Omni.Shared.Enemies.List[world]) do
-            add(type(info) == "table" and info.Name or key)
+        for key, info in pairs(Omni.Shared.Enemies.List[world] or {}) do
+            add(type(info) == "table" and type(info.Name) == "string" and info.Name or key)
         end
     end)
     for _, enemy in ipairs(findEnemies(serverFolder("Enemies", "Maps", world))) do
         add(enemy:GetAttribute("EnemyName"))
     end
-    add(S("MobFarm.Mobs"))
     table.sort(names)
     return names
 end
+
+-- Discover regular worlds from the game, including worlds not visited/unlocked yet.
+-- The Maps folder is deliberately separate from Gamemodes and Training.
+local farmCatalog = { dropdowns = {}, cached = {}, mobs = nil }
+function farmCatalog.discover()
+    local names, seen, order = {}, {}, {}
+    local function add(name, index)
+        if type(name) ~= "string" or name == "" or name == "Lobby" then return end
+        if type(index) == "number" then order[name] = index end
+        if not seen[name] then
+            seen[name] = true
+            names[#names + 1] = name
+        end
+    end
+    pcall(function()
+        for key, info in pairs(Omni.Shared.Maps.List) do
+            add(key, type(info) == "table" and info.Index or nil)
+        end
+    end)
+    pcall(function()
+        for world, enemies in pairs(Omni.Shared.Enemies.List) do
+            if type(enemies) == "table" then add(world) end
+        end
+    end)
+    local maps = serverFolder("Enemies", "Maps")
+    if maps then
+        for _, folder in ipairs(maps:GetChildren()) do add(folder.Name) end
+    end
+    table.sort(names, function(a, b)
+        local ai, bi = order[a] or math.huge, order[b] or math.huge
+        return ai < bi or (ai == bi and a < b)
+    end)
+    -- Keep existing data if a catalog temporarily becomes unavailable during travel.
+    if #names > 0 then
+        table.clear(MAP_NAMES)
+        table.clear(WORLD_MAPS)
+        WORLD_MAPS.Lobby = true
+        for _, name in ipairs(names) do
+            MAP_NAMES[#MAP_NAMES + 1] = name
+            WORLD_MAPS[name] = true
+        end
+    end
+    return MAP_NAMES
+end
+function farmCatalog.updateOptions(dropdown, key, options)
+    local previous = farmCatalog.cached[key]
+    local changed = not previous or #previous ~= #options
+    if not changed then
+        for i, value in ipairs(options) do
+            if previous[i] ~= value then changed = true; break end
+        end
+    end
+    if changed then
+        dropdown.setOptions(options)
+        farmCatalog.cached[key] = table.clone(options)
+    end
+end
+function farmCatalog.refreshMobs()
+    if not farmCatalog.mobs then return end
+    local names = mobNames(S("MobFarm.World"))
+    local options = #names > 0 and names or { "--" }
+    farmCatalog.updateOptions(farmCatalog.mobs, "MobFarm.Mobs", options)
+    if not table.find(options, S("MobFarm.Mobs")) then
+        -- Do not silently move an active farm onto a different enemy after an update.
+        if allToggles["MobFarm.AutoFarm"] then allToggles["MobFarm.AutoFarm"].set(false) end
+        farmCatalog.mobs.set(options[1], true)
+    end
+end
+function farmCatalog.refresh()
+    local worlds = farmCatalog.discover()
+    for key, dropdown in pairs(farmCatalog.dropdowns) do
+        local options = table.clone(worlds)
+        if key == "Summon.World" then table.insert(options, 1, "Current World") end
+        if #options == 0 then options = { "--" } end
+        farmCatalog.updateOptions(dropdown, key, options)
+        if not table.find(options, S(key)) then
+            local toggleKey = key == "MobFarm.World" and "MobFarm.AutoFarm"
+                or key == "Bosses.FarmMap" and "Bosses.Farm"
+                or key == "Summon.World" and "Summon.AutoSummon"
+            if toggleKey and allToggles[toggleKey] then
+                allToggles[toggleKey].set(false)
+            end
+            dropdown.set(options[1], true)
+        end
+    end
+    farmCatalog.refreshMobs()
+end
+farmCatalog.discover()
 
 -- Boss teleports ---------------------------------------------------------------------
 
@@ -1739,7 +1820,6 @@ end
 
 local cleanup
 local fighterDropdowns = {}
-local mobsDropdown
 
 local function refreshFighters()
     local labels = fighterLabels()
@@ -1776,7 +1856,7 @@ local function buildTabs()
         setBossEnabled(farmBoss, value)
     end)
     farmBoss.statusLabel = addLabel(section, "Stopped", COLORS.accent)
-    addDropdown(section, "Map", "Bosses.FarmMap", MAP_NAMES, "Cursed Academy", W)
+    farmCatalog.dropdowns["Bosses.FarmMap"] = addDropdown(section, "Map", "Bosses.FarmMap", MAP_NAMES, "Cursed Academy", W)
     local position = getSetting("Bosses.FarmPosition", { -2243, 57, 208 })
     if type(position) ~= "table" or #position ~= 3 then
         settings["Bosses.FarmPosition"] = { -2243, 57, 208 }
@@ -1804,17 +1884,17 @@ local function buildTabs()
     addToggle(section, "Auto Farm", "MobFarm.AutoFarm", false, W)
     statusLabels.MobFarm = addLabel(section, "Disabled", COLORS.accent)
     addToggle(section, "Send fighters to closest", "MobFarm.SendToClosest", false, W)
-    addDropdown(section, "World", "MobFarm.World", MAP_NAMES, "Heaven Island", function(world)
-        mobsDropdown.setOptions(mobNames(world))
+    farmCatalog.dropdowns["MobFarm.World"] = addDropdown(section, "World", "MobFarm.World", MAP_NAMES, "Heaven Island", function()
+        farmCatalog.refreshMobs()
     end)
-    mobsDropdown = addDropdown(section, "Mob", "MobFarm.Mobs",
+    farmCatalog.mobs = addDropdown(section, "Mob", "MobFarm.Mobs",
         mobNames(getSetting("MobFarm.World", "Heaven Island")), "Hawk Eyes", W)
     addSlider(section, "Distance from mob", "MobFarm.Offset", 0, 15, 3)
 
     section = addSection(tab, 1, "Summon")
     addToggle(section, "Auto Summon", "Summon.AutoSummon", false, W)
     statusLabels.Summon = addLabel(section, "Disabled", COLORS.accent)
-    addDropdown(section, "World", "Summon.World", { "Current World", unpack(MAP_NAMES) }, "Current World", W)
+    farmCatalog.dropdowns["Summon.World"] = addDropdown(section, "World", "Summon.World", { "Current World", unpack(MAP_NAMES) }, "Current World", W)
     addDropdown(section, "Star", "Summon.Star", { "Closest" }, "Closest", W)
 
     section = addSection(tab, 2, "Secret Pity (stars)")
@@ -2039,6 +2119,7 @@ local function buildTabs()
     end)
 end
 buildTabs()
+farmCatalog.refresh()
 
 -- Features ---------------------------------------------------------------------------
 
@@ -2046,11 +2127,17 @@ buildTabs()
 -- variables per function, and the hub's main body is close to that.
 local function startFeatures()
 
+every("Farming catalog", 5, farmCatalog.refresh)
+
 -- Mob farm: stay next to the chosen mob in the chosen world.
 local lastFighterSend = 0
 every("Mob Farm", 0.5, function()
     if not S("MobFarm.AutoFarm") then
         setStatus("MobFarm", "Disabled")
+        return
+    end
+    if not WORLD_MAPS[S("MobFarm.World")] or S("MobFarm.Mobs") == "--" then
+        setStatus("MobFarm", "Waiting for worlds and mobs to load")
         return
     end
     if positionTaken() then
