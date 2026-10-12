@@ -1,4 +1,16 @@
 -- FastHub: RNG Height. Shared FarmHub/FastHub menu template.
+-- Only start in the supported Roblox place.
+if game.PlaceId ~= 100342593906737 then
+    local message = "This script only works in RNG Height."
+    warn("[FastHub] " .. message)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Wrong game", Text = message, Duration = 6
+        })
+    end)
+    return
+end
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
