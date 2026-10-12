@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.3"
+local SCRIPT_VERSION = "2026.10.12.4"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -1529,12 +1529,9 @@ function hubMain.renderPerformance()
     local camera = workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize
     hubMain.labels.performance.Text = "FPS: " .. (p.fps and tostring(p.fps) or "sampling...")
-        .. "\nFrame time: " .. (p.frameMs and string.format("%.1f ms", p.frameMs) or "sampling...")
-        .. "\nLongest frame: " .. (p.worstMs and string.format("%.1f ms", p.worstMs) or "sampling...")
         .. "\nPing: " .. (pingOk and type(ping) == "number" and string.format("%.0f ms", ping) or "unavailable")
         .. "\nClient memory: " .. (memoryOk and type(memory) == "number" and string.format("%.0f MB", memory) or "unavailable")
         .. "\nPlayers: " .. #Players:GetPlayers() .. " / " .. Players.MaxPlayers
-        .. "\nWindow: " .. (viewport and (math.floor(viewport.X) .. " x " .. math.floor(viewport.Y)) or "unavailable")
         .. "\n" .. p.capStatus
 end
 
