@@ -5,7 +5,7 @@
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.4"
+local SCRIPT_VERSION = "2026.10.12.5"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -1627,7 +1627,9 @@ function hubMain.pick(enemies, position, names, mode, finish)
     local best, bestHealth, bestDistance = nil, math.huge, math.huge
     for _, enemy in ipairs(pool) do
         local distance = (enemyPosition(enemy) - position).Magnitude
-        local health = mode == "Lowest Health" and hubMain.health(enemy) or 0
+        local hp = hubMain.health(enemy)
+        local health = mode == "Lowest Health" and hp
+            or mode == "Highest Health" and (hp < math.huge and -hp or math.huge) or 0
         if health < bestHealth or (health == bestHealth and distance < bestDistance) then
             best, bestHealth, bestDistance = enemy, health, distance
         end
@@ -2403,7 +2405,7 @@ local function buildTabs()
     farmCatalog.mobs = addDropdown(section, "Mobs (select multiple)", "MobFarm.Mobs",
         mobNames(getSetting("MobFarm.World", "Heaven Island")), { "Hawk Eyes" }, farmCatalog.remember, true)
     addDropdown(section, "Targeting mode", "MobFarm.TargetMode",
-        {"Closest", "Lowest Health", "Bosses First", "Rotate Types"}, "Closest", W)
+        {"Closest", "Lowest Health", "Highest Health", "Bosses First", "Rotate Types"}, "Closest", W)
     addToggle(section, "Finish current target before switching", "MobFarm.FinishTarget", true, W)
     addLabel(section, "Tick any mobs to farm. Targets the closest selected mob; untick to remove.", COLORS.dim)
     addSlider(section, "Distance from mob", "MobFarm.Offset", 0, 15, 3)
