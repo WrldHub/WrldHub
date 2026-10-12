@@ -118,6 +118,12 @@ for key in pairs(settings) do
     end
 end
 
+-- The old dungeon option meant "when cleared"; do not reuse it for an early exit.
+if settings["Dungeon.Wave"] == nil then
+    settings["Dungeon.Wave"] = 26
+    settings["Dungeon.AutoLeave"] = false
+end
+
 local saveQueued = false
 local function setSetting(key, value)
     settings[key] = value
@@ -1046,12 +1052,6 @@ local RARITIES = { "--", "Common", "Rare", "Epic", "Legendary", "Mythical", "Sec
 local DUNGEON_ENTRY_GRACE = 75 -- seconds after :00 before assuming you skipped the dungeon
 local SHOP_NAME = "Adventurer Shop"
 local UPGRADE_GROUP = "Adventurer Upgrades"
-local INDEX_DATA_KEYS = {
-    Fighters = "Fighter",
-    Accessories = "Accessory",
-    Weapons = "Weapon",
-    Enemies = "Enemy"
-}
 local SIDE_QUESTS = {
     ["Slayers.QuestCrimsonMoon"] = "Beneath the Crimson Moon",
     ["Sins.QuestGreedOfTheFox"] = "The Greed of the Fox",
@@ -1989,7 +1989,8 @@ local function buildTabs()
     statusLabels.Dungeon = addLabel(section, "", COLORS.accent)
     addDropdown(section, "Difficulty", "Dungeon.Difficulty", DIFFICULTIES, "Easy", W)
     addToggle(section, "Walk to enemies (no teleport)", "Dungeon.WalkToEnemy", false, W)
-    addToggle(section, "Auto Leave when cleared", "Dungeon.AutoLeave", false, W)
+    addToggle(section, "Auto Leave at wave", "Dungeon.AutoLeave", false, W)
+    addSlider(section, "Leave at wave", "Dungeon.Wave", 1, 100, 26)
 
     section = addSection(tab, 2, "Culling Game")
     statusLabels.Culling = addLabel(section, "Disabled", COLORS.accent)
@@ -2303,12 +2304,7 @@ every("Gamemodes", 1, function()
         -- Wave checks wait until the run has been going long enough for the HUD to refresh.
         local wave, total = readWave()
         if S(activity .. ".AutoLeave") and wave and os.clock() - gamemodeSince > 10 then
-            if activity == "Dungeon" then
-                if total and total > 0 and wave >= total then
-                    leaveGamemode("all rooms cleared")
-                    return 5
-                end
-            elseif wave >= (tonumber(S(activity .. ".Wave")) or math.huge) then
+            if wave >= (tonumber(S(activity .. ".Wave")) or math.huge) then
                 leaveGamemode("wave " .. wave .. " reached")
                 return 5
             end
@@ -3227,87 +3223,98 @@ every("Quests", 60, function()
     end
 end)
 
-local loadedAt = os.clock()
-local lastIndexCount = {}
-local function isClaimed(claimed, index)
-    return claimed ~= nil and (claimed[index] or claimed[tostring(index)]) == true
+-- Match the game's own reward UI checks. Each family runs independently so one
+-- missing data table cannot prevent the other rewards from being checked.
+local rewardChecks = { retryAt = {}, handlers = {} }
+function rewardChecks.isClaimed(claimed, index)
+    return type(claimed) == "table"
+        and (claimed[index] == true or claimed[tostring(index)] == true)
 end
-
--- Checked every 5 seconds so a toggle acts almost as soon as it is switched on. Everything
--- here only sends a request when your save data shows something is waiting.
-local lastAchievementClaim = -math.huge
-every("Rewards", 5, function()
-    local data = Omni.Data
-    if S("Rewards.AutoAchievement") and os.clock() - lastAchievementClaim > 60 then
-        lastAchievementClaim = os.clock()
-        fire("Achievements", "ClaimAll")
-    end
-
-    if S("Rewards.AutoInbox") then
-        local waiting = 0
-        for _, message in pairs(data.Inbox and data.Inbox.List or {}) do
-            if not message.Claimed then
-                waiting = waiting + 1
-            end
-        end
-        if waiting > 0 then
-            logAction("Claim " .. waiting .. " inbox message(s)")
-            fire("Inbox", "ClaimAll")
-            task.wait(2)
-        end
-    end
-
-    if S("Rewards.AutoDaily") and data.DailyRewards then
-        local day = math.floor((workspace:GetServerTimeNow() - (data.DailyRewards.Start or 0)) / 86400) + 1
-        for index = 1, math.clamp(day, 0, 30) do
-            if not isClaimed(data.DailyRewards.Claimed, index) then
-                fire("DailyRewards", "Claim", index)
-                task.wait(0.1)
+function rewardChecks.claim(toggle, tag, system, action, ...)
+    if not alive or not S(toggle) then return end
+    local now = os.clock()
+    if now < (rewardChecks.retryAt[tag] or 0) then return end
+    -- Retry an unconfirmed claim after 15 seconds, even if progress is unchanged.
+    rewardChecks.retryAt[tag] = now + 15
+    fire(system, action, ...)
+    task.wait(0.1)
+end
+rewardChecks.handlers["Rewards.AutoAchievement"] = function(data)
+    local catalog = Omni.Shared.Achievements
+    if type(data.Achievements) ~= "table" then return end
+    for _, list in pairs(catalog.List) do
+        for _, info in pairs(list) do
+            if data.Achievements[info.Name] ~= true
+                and select(3, catalog.GetProgress(data, info)) == 1 then
+                rewardChecks.claim("Rewards.AutoAchievement", "Achievements", "Achievements", "ClaimAll")
+                return
             end
         end
     end
-
-    if S("Rewards.AutoTime") and data.TimeRewards then
-        local played = (data.TimeRewards.TimePlayed or 0) + (os.clock() - loadedAt)
-        for index, info in pairs(Omni.Shared.TimeRewards) do
-            if type(info) == "table" and type(info.Time) == "number" and played >= info.Time
-                and not isClaimed(data.TimeRewards.Claimed, index) then
-                fire("TimeRewards", "Claim", index)
-                task.wait(0.1)
+end
+rewardChecks.handlers["Rewards.AutoInbox"] = function(data)
+    for _, message in pairs(data.Inbox and data.Inbox.List or {}) do
+        if type(message) == "table" and message.Claimed ~= true then
+            rewardChecks.claim("Rewards.AutoInbox", "Inbox", "Inbox", "ClaimAll")
+            return
+        end
+    end
+end
+rewardChecks.handlers["Rewards.AutoDaily"] = function(data)
+    local daily = data.DailyRewards
+    if not daily or type(daily.Start) ~= "number" then return end
+    -- A new player with Start == 0 can claim only day 1.
+    local day = daily.Start == 0 and 1
+        or math.floor((workspace:GetServerTimeNow() - daily.Start) / 86400) + 1
+    for index, info in pairs(Omni.Shared.DailyRewards) do
+        if type(index) == "number" and type(info) == "table" and index <= day
+            and not rewardChecks.isClaimed(daily.Claimed, index) then
+            rewardChecks.claim("Rewards.AutoDaily", "Daily:" .. daily.Start .. ":" .. index,
+                "DailyRewards", "Claim", index)
+        end
+    end
+end
+rewardChecks.handlers["Rewards.AutoTime"] = function(data)
+    local timed = data.TimeRewards
+    if not timed or type(timed.TimePlayed) ~= "number" then return end
+    -- TimePlayed is already updated by the game; adding os.clock would double-count it.
+    for index, info in pairs(Omni.Shared.TimeRewards) do
+        if type(info) == "table" and type(info.Time) == "number"
+            and timed.TimePlayed >= info.Time
+            and not rewardChecks.isClaimed(timed.Claimed, index) then
+            rewardChecks.claim("Rewards.AutoTime", "Time:" .. tostring(timed.ResetAt) .. ":" .. index,
+                "TimeRewards", "Claim", index)
+        end
+    end
+end
+rewardChecks.handlers["Rewards.AutoLevelRewards"] = function(data)
+    local level = data.Level
+    if not level or type(level.Amount) ~= "number" then return end
+    for _, info in pairs(Omni.Shared.PlayerLevel.List.Rewards) do
+        if info.Level <= level.Amount and not (level.Rewards and level.Rewards["Level" .. info.Level] == true) then
+            rewardChecks.claim("Rewards.AutoLevelRewards", "Level:" .. info.Level,
+                "PlayerLevel", "ClaimReward", info.Level)
+        end
+    end
+end
+rewardChecks.handlers["Rewards.AutoIndex"] = function(data)
+    if type(data.Index) ~= "table" or type(data.IndexRewards) ~= "table" then return end
+    local catalog = Omni.Shared.Index
+    for section, group in pairs(catalog.Rewards) do
+        local discovered = catalog.GetDiscoveredAmount(section, data)
+        for _, info in pairs(group.List) do
+            if info.Amount <= discovered and not catalog.IsRewardClaimed(section, info.Amount, data) then
+                rewardChecks.claim("Rewards.AutoIndex", "Index:" .. section .. ":" .. info.Amount,
+                    "IndexRewards", "Claim", section, info.Amount)
             end
         end
     end
-
-    if S("Rewards.AutoLevelRewards") then
-        for _, reward in pairs(Omni.Shared.PlayerLevel.List.Rewards) do
-            if reward.Level <= data.Level.Amount and not data.Level.Rewards["Level" .. reward.Level] then
-                fire("PlayerLevel", "ClaimReward", reward.Level)
-                task.wait(0.1)
-            end
-        end
-    end
-
-    -- Index milestones are not listed client-side, so each unclaimed count up to what you
-    -- have discovered is tried once whenever that count changes.
-    if S("Rewards.AutoIndex") then
-        for section, dataKey in pairs(INDEX_DATA_KEYS) do
-            local discovered = 0
-            for _ in pairs(data.Index and data.Index[dataKey] or {}) do
-                discovered = discovered + 1
-            end
-            if lastIndexCount[section] ~= discovered then
-                lastIndexCount[section] = discovered
-                local claimed = data.IndexRewards and data.IndexRewards[section]
-                for amount = 1, discovered do
-                    if not isClaimed(claimed, amount) then
-                        fire("IndexRewards", "Claim", section, amount)
-                        task.wait(0.1)
-                    end
-                end
-            end
-        end
-    end
-end)
+end
+for toggle, check in pairs(rewardChecks.handlers) do
+    every(toggle, 5, function()
+        if S(toggle) then check(Omni.Data) end
+    end)
+end
 
 every("Fruits", 2, function()
     if not S("Heaven.AutoPickUpFruits") then return end
