@@ -1,7 +1,8 @@
 -- Farm Hub: standalone Roblox client script. Run this entire file together.
 -- Features call the game's own client module, so they send the same requests its UI sends.
 -- The few controls with dimmed text are saved but not wired to the game.
--- Right Shift hides/shows the window. Settings > Unload stops everything and removes it.
+-- Right Shift hides/shows the window by default; change the key in Settings.
+-- Settings > Unload stops everything and removes it.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -23,7 +24,6 @@ local WORLD_BOSS_MAX_HOLD = 20 * 60   -- safety cap on the pause
 local BOSS_APPEAR_TIMEOUT = 15        -- give up if the boss never shows after arriving
 local BOSS_GONE_CONFIRM = 3           -- boss must be missing this long to count as dead
 local GAMEMODE_EXIT_DELAY = 3         -- seconds to wait after leaving a dungeon/trial
-local FARM_STEP_INTERVAL = 2          -- seconds between re-pins to the farm spot
 local _COMMANDMENT_INTERVAL = 5
 local SAVE_FILE = "FarmHub_settings.json"
 -- Any other map with an active teleport folder counts as a dungeon/trial/gamemode.
@@ -84,7 +84,6 @@ end
 if settings._version ~= 2 then
     local keep = {
         ["Bosses.WorldBoss"] = true,
-        ["Bosses.Farm"] = true,
         ["Bosses.PauseInGamemode"] = true,
         ["Sins.AutoCommandments"] = true,
         ["Session.AntiAfk"] = true,
@@ -106,6 +105,19 @@ end
 if settings["Culling.Role"] == nil then settings["Culling.Role"] = settings["Culling.AutoJoin"] and "Player" or "Host" end
 settings["Culling.AutoCulling"], settings["Culling.AutoJoin"] = false, false
 
+-- Removed features must not resume from saved settings.
+for key in pairs(settings) do
+    if type(key) == "string" and (string.sub(key, 1, 11) == "Bosses.Farm"
+        or string.sub(key, 1, 7) == "Summon."
+        or string.sub(key, 1, 5) == "Feed."
+        or string.sub(key, 1, 12) == "Deconstruct."
+        or key == "Lobby.Fighter" or key == "Lobby.AutoTalents" or key == "Lobby.AutoTraits"
+        or key == "Lobby.TalentsStopAt" or key == "Lobby.TraitsStopAt"
+        or key == "Equipment.AutoEquipBest") then
+        settings[key] = nil
+    end
+end
+
 local saveQueued = false
 local function setSetting(key, value)
     settings[key] = value
@@ -123,6 +135,18 @@ local function getSetting(key, default)
     end
     return settings[key]
 end
+
+local menuKey = { capturing = false, button = nil, name = "RightShift" }
+function menuKey.set(name)
+    local ok, key = pcall(function() return Enum.KeyCode[name] end)
+    if not ok or not key or key == Enum.KeyCode.Unknown or key == Enum.KeyCode.Escape then
+        name = "RightShift"
+    end
+    menuKey.name = name
+    menuKey.capturing = false
+    setSetting("Session.MenuKey", name)
+end
+menuKey.set(getSetting("Session.MenuKey", "RightShift"))
 
 -- UI toolkit -------------------------------------------------------------------------
 
@@ -232,7 +256,8 @@ do
         Position = UDim2.fromOffset(16, 36),
         Size = UDim2.new(1, -32, 0, 16),
         BackgroundTransparency = 1,
-        Text = "Right Shift: hide/show",
+        Name = "MenuKeyHint",
+        Text = menuKey.name .. ": hide/show",
         TextColor3 = COLORS.dim,
         TextXAlignment = Enum.TextXAlignment.Left,
         Font = FONT,
@@ -899,11 +924,31 @@ connect(UserInputService.InputEnded, function(input)
     windowStart = nil
 end)
 
-connect(UserInputService.InputBegan, function(input, processed)
-    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+function menuKey.render()
+    local hint = gui:FindFirstChild("MenuKeyHint", true)
+    if hint then hint.Text = menuKey.name .. ": hide/show" end
+    if menuKey.button then
+        menuKey.button.Text = menuKey.capturing and "Press a key (Esc cancels)"
+            or ("Menu key: " .. menuKey.name .. " (click to change)")
+    end
+end
+function menuKey.handle(input, processed)
+    if UserInputService:GetFocusedTextBox() then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard or input.KeyCode == Enum.KeyCode.Unknown then return end
+    if menuKey.capturing then
+        if input.KeyCode == Enum.KeyCode.Escape then
+            menuKey.capturing = false
+        else
+            menuKey.set(input.KeyCode.Name)
+        end
+        menuKey.render()
+        return
+    end
+    if not processed and input.KeyCode.Name == menuKey.name then
         window.Visible = not window.Visible
     end
-end)
+end
+connect(UserInputService.InputBegan, menuKey.handle)
 
 -- Game access ------------------------------------------------------------------------
 
@@ -914,7 +959,6 @@ local StarterGui = game:GetService("StarterGui")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
 
-local RANKS = { "F", "E", "D", "C", "B", "A", "S" }
 local RARITIES = { "--", "Common", "Rare", "Epic", "Legendary", "Mythical", "Secret" }
 local DUNGEON_ENTRY_GRACE = 75 -- seconds after :00 before assuming you skipped the dungeon
 local SHOP_NAME = "Adventurer Shop"
@@ -1205,27 +1249,6 @@ local function equippedFighterIds()
     return ids
 end
 
--- Fighter dropdowns show "Name #abcd"; this maps those labels back to fighter IDs.
-local fighterIdByLabel = {}
-local function fighterLabels()
-    local labels = {}
-    table.clear(fighterIdByLabel)
-    for id, fighter in pairs(Omni.Data.Fighters.List or {}) do
-        local label = tostring(fighter.Name) .. (fighter.Shiny and " (Shiny)" or "")
-            .. " #" .. string.sub(id, -4)
-        fighterIdByLabel[label] = id
-        labels[#labels + 1] = label
-    end
-    table.sort(labels)
-    table.insert(labels, 1, "--")
-    return labels
-end
-
-local function selectedFighter(key)
-    local id = fighterIdByLabel[S(key)]
-    return id, id and Omni.Data.Fighters.List[id]
-end
-
 local function mobNames(world)
     local names, seen = {}, {}
     local function add(name)
@@ -1323,13 +1346,10 @@ function farmCatalog.refresh()
     local worlds = farmCatalog.discover()
     for key, dropdown in pairs(farmCatalog.dropdowns) do
         local options = table.clone(worlds)
-        if key == "Summon.World" then table.insert(options, 1, "Current World") end
         if #options == 0 then options = { "--" } end
         farmCatalog.updateOptions(dropdown, key, options)
         if not table.find(options, S(key)) then
-            local toggleKey = key == "MobFarm.World" and "MobFarm.AutoFarm"
-                or key == "Bosses.FarmMap" and "Bosses.Farm"
-                or key == "Summon.World" and "Summon.AutoSummon"
+            local toggleKey = "MobFarm.AutoFarm"
             if toggleKey and allToggles[toggleKey] then
                 allToggles[toggleKey].set(false)
             end
@@ -1343,7 +1363,6 @@ farmCatalog.discover()
 -- Boss teleports ---------------------------------------------------------------------
 
 local busyBoss = nil
-local lastRequestedMap = nil
 
 local worldBoss = {
     name = "World Boss",
@@ -1352,13 +1371,7 @@ local worldBoss = {
     enabled = false,
     phase = "off"
 }
-local farmBoss = {
-    name = "Boss Farm",
-    isFarm = true,
-    enabled = false,
-    phase = "off"
-}
-local bosses = { worldBoss, farmBoss }
+local bosses = { worldBoss }
 
 local function formatTime(seconds)
     seconds = math.max(0, math.ceil(seconds))
@@ -1367,11 +1380,6 @@ local function formatTime(seconds)
         math.floor(seconds / 60) % 60,
         seconds % 60
     )
-end
-
-local function farmCFrame()
-    local position = settings["Bosses.FarmPosition"]
-    return CFrame.new(position[1], position[2], position[3])
 end
 
 local function bossStatus(boss)
@@ -1383,7 +1391,7 @@ local function bossStatus(boss)
     if boss.phase == "teleporting" then
         return "Entering map in: " .. formatTime(boss.teleportAt - now)
     elseif boss.phase == "holding" then
-        return boss.bossSeen and "Boss alive, boss farm paused" or "Looking for the boss..."
+        return boss.bossSeen and "Boss alive, farming paused" or "Looking for the boss..."
     elseif boss.phase == "dungeon" then
         return "Waiting for the :00 dungeon to finish"
     elseif boss.phase == "gamemode" then
@@ -1392,8 +1400,7 @@ local function bossStatus(boss)
         return "Paused for the other teleport..."
     elseif boss.phase == "loading" then
         return "Waiting for your character..."
-    elseif boss.isFarm then
-        return "Holding the farm spot"
+
     end
     return "Next run: " .. formatTime((boss.nextRun or now) - now)
 end
@@ -1449,7 +1456,7 @@ local function acquireTeleport(boss)
             -- World Boss pulls you out of gamemodes ranked below it in the Priority list.
             local gamemode = currentGamemode()
             local activity = gamemode and activityOf(gamemode)
-            if not boss.isFarm and activity and settings["Priority.LeaveForPriority"]
+            if activity and settings["Priority.LeaveForPriority"]
                 and activityManaged(activity)
                 and priorityRank("World Boss") < priorityRank(activity)
                 and os.clock() - lastPriorityLeave > 5 then
@@ -1459,7 +1466,6 @@ local function acquireTeleport(boss)
             end
             boss.phase = "gamemode"
             -- Force a map re-entry once the dungeon/trial is over.
-            lastRequestedMap = nil
             boss.gamemodeClearAt = os.clock() + GAMEMODE_EXIT_DELAY
         elseif boss.gamemodeClearAt and os.clock() < boss.gamemodeClearAt then
             boss.phase = "gamemode"
@@ -1478,7 +1484,6 @@ end
 -- Sends the game's own map teleport and waits for the map to load.
 local function requestMap(map)
     fire("Maps", "Teleport", map)
-    lastRequestedMap = map
     task.wait(TELEPORT_DELAY)
 end
 
@@ -1598,29 +1603,6 @@ local function runWorldBoss(boss)
     end
 end
 
-local function runBossFarm(boss)
-    while alive and boss.enabled do
-        if not acquireTeleport(boss) then return end
-
-        local success, message = pcall(function()
-            -- Enter the farm map once, and return after World Boss or a dungeon/trial.
-            boss.map = settings["Bosses.FarmMap"]
-            if lastRequestedMap ~= boss.map then
-                enterMap(boss)
-            end
-            moveCharacter(boss, farmCFrame())
-        end)
-        if busyBoss == boss then busyBoss = nil end
-        if not success then
-            failBoss(boss, message)
-            return
-        end
-
-        boss.phase = "cycling"
-        task.wait(FARM_STEP_INTERVAL)
-    end
-end
-
 local function setBossEnabled(boss, value)
     if not alive then return end
     if not value then
@@ -1632,17 +1614,13 @@ local function setBossEnabled(boss, value)
     boss.enabled = true
     boss.phase = "queued"
     boss.worker = task.defer(function()
-        if boss.isFarm then
-            runBossFarm(boss)
-        else
-            runWorldBoss(boss)
-        end
+        runWorldBoss(boss)
     end)
 end
 
 -- True while something with a higher claim on your position is active.
 local function positionTaken()
-    return busyBoss ~= nil or farmBoss.enabled or currentGamemode() ~= nil
+    return busyBoss ~= nil or currentGamemode() ~= nil
 end
 
 -- Goes to a world map if you are not already there. Returns true once you are in it.
@@ -1862,15 +1840,6 @@ local function setEventPopupBlocked(value)
 end
 
 local cleanup
-local fighterDropdowns = {}
-
-local function refreshFighters()
-    local labels = fighterLabels()
-    for _, dropdown in ipairs(fighterDropdowns) do
-        dropdown.setOptions(labels)
-    end
-end
-
 -- Tabs -------------------------------------------------------------------------------
 
 -- Built inside one function so the tab variables do not count against Luau's limit of 200
@@ -1888,38 +1857,11 @@ local function buildTabs()
     end)
     worldBoss.statusLabel = addLabel(section, "Stopped", COLORS.accent)
     addLabel(section, "Goes to Sins Kingdom for Demon Melyode as soon as the :00 dungeon is finished "
-        .. "(or about a minute after :00 if you did not join it), and pauses the boss farm until "
+        .. "(or about a minute after :00 if you did not join it), and pauses farming until "
         .. "the boss is dead.", COLORS.dim)
 
     section = addSection(tab, 1, "Safety")
     addToggle(section, "Pause bosses in dungeon/trial", "Bosses.PauseInGamemode", true, W)
-
-    section = addSection(tab, 2, "Boss Farm")
-    farmBoss.toggle = addToggle(section, "Auto Boss Farm", "Bosses.Farm", false, function(value)
-        setBossEnabled(farmBoss, value)
-    end)
-    farmBoss.statusLabel = addLabel(section, "Stopped", COLORS.accent)
-    farmCatalog.dropdowns["Bosses.FarmMap"] = addDropdown(section, "Map", "Bosses.FarmMap", MAP_NAMES, "Cursed Academy", W)
-    local position = getSetting("Bosses.FarmPosition", { -2243, 57, 208 })
-    if type(position) ~= "table" or #position ~= 3 then
-        settings["Bosses.FarmPosition"] = { -2243, 57, 208 }
-    end
-    local positionLabel = addLabel(section, "", COLORS.text, nil, 13)
-    local function renderPosition()
-        local saved = settings["Bosses.FarmPosition"]
-        positionLabel.Text = string.format("Farm spot: %d, %d, %d", saved[1], saved[2], saved[3])
-    end
-    renderPosition()
-    addButton(section, "Set Spot to My Position", function()
-        local root = getRoot()
-        if not root then return end
-        setSetting("Bosses.FarmPosition", {
-            math.floor(root.Position.X + 0.5),
-            math.floor(root.Position.Y + 0.5),
-            math.floor(root.Position.Z + 0.5)
-        })
-        renderPosition()
-    end)
 
     -- Farming
     tab = addTab("Farming")
@@ -1934,12 +1876,6 @@ local function buildTabs()
         mobNames(getSetting("MobFarm.World", "Heaven Island")), { "Hawk Eyes" }, W, true)
     addLabel(section, "Tick any mobs to farm. Targets the closest selected mob; untick to remove.", COLORS.dim)
     addSlider(section, "Distance from mob", "MobFarm.Offset", 0, 15, 3)
-
-    section = addSection(tab, 1, "Summon")
-    addToggle(section, "Auto Summon", "Summon.AutoSummon", false, W)
-    statusLabels.Summon = addLabel(section, "Disabled", COLORS.accent)
-    farmCatalog.dropdowns["Summon.World"] = addDropdown(section, "World", "Summon.World", { "Current World", unpack(MAP_NAMES) }, "Current World", W)
-    addDropdown(section, "Star", "Summon.Star", { "Closest" }, "Closest", W)
 
     section = addSection(tab, 2, "Secret Pity (stars)")
     statusLabels.Pity = addLabel(section, "Loading...", COLORS.text)
@@ -1981,43 +1917,6 @@ local function buildTabs()
     addToggle(section, "Auto Leave at wave", "Culling.AutoLeave", false, W)
     addNumberBox(section, "Leave when this wave begins", "Culling.Wave", 6)
     addLabel(section, "Teleports once above each enemy. Minis first while the boss is shielded. Settings stay editable.", COLORS.dim)
-
-    -- Fighters
-    tab = addTab("Fighters")
-    section = addSection(tab, 1, "Feed")
-    addToggle(section, "Auto Feed", "Feed.AutoFeed", false, W)
-    statusLabels.Feed = addLabel(section, "Disabled", COLORS.accent)
-    addDropdown(section, "Who to feed", "Feed.Mode", { "Selected Fighters", "Equipped Fighters" },
-        "Selected Fighters", W)
-    fighterDropdowns[#fighterDropdowns + 1] = addDropdown(section, "Fighter", "Feed.Fighters",
-        fighterLabels(), "--", W)
-    local foods = { "Cursed Mochi" }
-    pcall(function()
-        foods = Omni.Shared.FighterFeed.GetFoods()
-    end)
-    addDropdown(section, "Food", "Feed.Food", foods, "Cursed Mochi", W)
-    addNumberBox(section, "Food per feed", "Feed.Amount", 1000)
-
-    section = addSection(tab, 1, "Deconstruct")
-    addToggle(section, "Auto Deconstruct", "Deconstruct.AutoDeconstruct", false, W)
-    statusLabels.Deconstruct = addLabel(section, "Disabled", COLORS.accent)
-    addLabel(section, "Only fighters you set to Auto Deconstruct in the game's star settings, and "
-        .. "only if unlocked, unequipped, not in a team and level 1.", COLORS.dim)
-
-    section = addSection(tab, 2, "Talents and Traits")
-    fighterDropdowns[#fighterDropdowns + 1] = addDropdown(section, "Fighter to roll on",
-        "Lobby.Fighter", fighterLabels(), "--", W)
-    statusLabels.Rolls = addLabel(section, "", COLORS.accent)
-    addToggle(section, "Auto Talents", "Lobby.AutoTalents", false, W)
-    addDropdown(section, "Stop when all talents reach", "Lobby.TalentsStopAt", RANKS, "S", W)
-    addToggle(section, "Auto Traits", "Lobby.AutoTraits", false, W)
-    addDropdown(section, "Stop at trait", "Lobby.TraitsStopAt", sortedKeys(function()
-        return Omni.Shared.Traits.List
-    end, "--"), "--", W)
-
-    section = addSection(tab, 2, "Equipment")
-    addToggle(section, "Auto Equip Best", "Equipment.AutoEquipBest", false, W)
-    addToggle(section, "Auto Evolve Accessories", "Equipment.AutoEvolveAccessories", false, W)
 
     -- Worlds
     tab = addTab("Worlds")
@@ -2082,6 +1981,8 @@ local function buildTabs()
 
     -- Items and shop
     tab = addTab("Items & Shop")
+    section = addSection(tab, 1, "Accessories")
+    addToggle(section, "Auto Evolve Accessories", "Equipment.AutoEvolveAccessories", false, W)
     section = addSection(tab, 1, "Potions")
     addToggle(section, "Auto Drink", "Potions.AutoDrink", false, W)
     addDropdown(section, "Potion (-- drinks every kind)", "Potions.Selected", sortedKeys(function()
@@ -2146,6 +2047,11 @@ local function buildTabs()
         .. "FarmHub_log.txt in your Potassium workspace folder.", COLORS.dim)
 
     section = addSection(tab, 2, "Controls")
+    menuKey.button = addButton(section, "", function()
+        menuKey.capturing = not menuKey.capturing
+        menuKey.render()
+    end)
+    menuKey.render()
     addButton(section, "Stop All Features", function()
         for key, toggle in pairs(allToggles) do
             if settings[key] == true and string.sub(key, 1, 8) ~= "Session."
@@ -2157,7 +2063,6 @@ local function buildTabs()
         end
     end)
     addButton(section, "Save Settings", saveSettings)
-    addButton(section, "Refresh Fighter Lists", refreshFighters)
     addButton(section, "Unload Hub", function()
         cleanup(true)
     end)
@@ -2216,55 +2121,6 @@ every("Mob Farm", 0.5, function()
     end
     setStatus("MobFarm", "Farming " .. tostring(target:GetAttribute("EnemyName"))
         .. " (" .. #S("MobFarm.Mobs") .. " selected)")
-end)
-
--- Summon: stand at a star and open it on the game's own cooldown.
-local nextStarRoll = 0
-every("Summon", 0.3, function()
-    if not S("Summon.AutoSummon") then
-        setStatus("Summon", "Disabled")
-        return
-    end
-    if positionTaken() or S("MobFarm.AutoFarm") then
-        setStatus("Summon", "Paused: another activity has priority")
-        return
-    end
-
-    local world = S("Summon.World")
-    if world == "Current World" then
-        world = Omni.Data.Maps.Current
-    end
-    if not WORLD_MAPS[world] or world == "Lobby" then
-        setStatus("Summon", "No star in " .. tostring(world))
-        return
-    end
-    if not ensureMap(world) then
-        setStatus("Summon", "Travelling to " .. world)
-        return
-    end
-    local root = getRoot()
-    if not root then return end
-
-    local stars = {}
-    for _, star in ipairs((serverFolder("Stars") or workspace):GetChildren()) do
-        if star.Name == world then
-            stars[#stars + 1] = star
-        end
-    end
-    local star, distance = nearestTo(stars, root.Position)
-    if not star then
-        setStatus("Summon", "No star loaded in " .. world)
-        return
-    end
-    if distance > 8 then
-        teleportTo(CFrame.new(star:GetPivot().Position + Vector3.new(0, 3, 6)))
-    end
-    if os.clock() >= nextStarRoll then
-        local speed = playerStat("StarOpenSpeed", 1)
-        nextStarRoll = os.clock() + 3.5 / speed + 0.2
-        fire("Stars", "Roll", world, playerStat("MaxStarOpens", 1), nextRequest())
-    end
-    setStatus("Summon", "Opening " .. world .. " star")
 end)
 
 -- Gamemodes: join by schedule and priority, fight, and leave at the chosen wave.
@@ -2997,56 +2853,12 @@ local function rollReady(name)
     return os.clock() >= (nextRoll[name] or 0)
 end
 
-local function rankIndex(rank)
-    return table.find(RANKS, rank) or 0
-end
-
 every("Rolls", 0.25, function()
     local data = Omni.Data
     for name, key in pairs({ Haki = "Heaven.AutoHaki", ["Cursed Technique"] = "Cursed.AutoCursedTechnique" }) do
         if S(key) and rollReady(name) then
             nextRoll[name] = os.clock() + playerStat("GachaCooldown", 1, name) + 0.1
             fire("Gacha", "Roll", name, nil, nextRequest())
-        end
-    end
-
-    if S("Lobby.AutoTalents") and rollReady("Talents") then
-        local id, fighter = selectedFighter("Lobby.Fighter")
-        local talents = fighter and fighter.Talents and fighter.Talents.Current
-        if not talents then
-            setStatus("Rolls", "Pick a fighter for Talents/Traits")
-        else
-            local goal = rankIndex(S("Lobby.TalentsStopAt"))
-            local done = true
-            for _, rank in pairs(talents) do
-                if rankIndex(rank) < goal then
-                    done = false
-                end
-            end
-            if done then
-                allToggles["Lobby.AutoTalents"].set(false)
-                notify("Talents reached " .. tostring(S("Lobby.TalentsStopAt")) .. ". Auto Talents stopped.")
-            else
-                nextRoll.Talents = os.clock() + playerStat("GachaCooldown", 1, "Talents") + 0.1
-                fire("Gacha", "Roll", "Talents", id, nextRequest())
-                setStatus("Rolls", "Rolling talents")
-            end
-        end
-    end
-
-    if S("Lobby.AutoTraits") and rollReady("Traits") then
-        local id, fighter = selectedFighter("Lobby.Fighter")
-        local trait = fighter and fighter.Trait and fighter.Trait.Current
-        if not fighter then
-            setStatus("Rolls", "Pick a fighter for Talents/Traits")
-        elseif trait and (trait == S("Lobby.TraitsStopAt")
-            or (data.Traits and data.Traits.AutoStop and data.Traits.AutoStop[trait])) then
-            allToggles["Lobby.AutoTraits"].set(false)
-            notify("Trait " .. tostring(trait) .. " rolled. Auto Traits stopped.")
-        else
-            nextRoll.Traits = os.clock() + playerStat("TraitsCooldown", 2) + 0.2
-            fire("Traits", "Spin", id, nextRequest())
-            setStatus("Rolls", "Rolling traits")
         end
     end
 
@@ -3264,10 +3076,6 @@ every("Chests", 30, function()
 end)
 
 every("Equipment", 30, function()
-    if S("Equipment.AutoEquipBest") then
-        fire("Fighters", "EquipBest")
-        fire("Weapons", "EquipBest")
-    end
     if S("Equipment.AutoEvolveAccessories") then
         fire("Accessories", "EvolveAll")
     end
@@ -3421,82 +3229,6 @@ every("Fruits", 2, function()
             fire("Fruits", "Collect", fruitId)
         end
     end
-end)
-
--- Feed: gives the chosen food in fixed portions and backs off when the game refuses.
-local feedRefusals = {}
-every("Feed", 3, function()
-    if not S("Feed.AutoFeed") then
-        setStatus("Feed", "Disabled")
-        table.clear(feedRefusals)
-        return
-    end
-
-    local food = S("Feed.Food")
-    local available = Omni.Shared.FighterFeed.GetAvailableAmount(food, Omni.Data) or 0
-    if available <= 0 then
-        setStatus("Feed", "No " .. tostring(food) .. " left")
-        return
-    end
-
-    local targets = {}
-    if S("Feed.Mode") == "Equipped Fighters" then
-        targets = equippedFighterIds()
-    else
-        targets = { (selectedFighter("Feed.Fighters")) }
-    end
-    if #targets == 0 then
-        setStatus("Feed", "Pick a fighter")
-        return
-    end
-
-    local portion = math.max(1, math.floor(tonumber(S("Feed.Amount")) or 1000))
-    local fed = 0
-    for _, id in ipairs(targets) do
-        if (feedRefusals[id] or 0) < 3 and available > 0 then
-            local amount = math.min(portion, available)
-            local ok, result = pcall(invoke, "Fighters", "Feed", id, { [food] = amount })
-            if ok and result then
-                available = available - amount
-                fed = fed + 1
-                feedRefusals[id] = 0
-            else
-                feedRefusals[id] = (feedRefusals[id] or 0) + 1
-            end
-        end
-    end
-    setStatus("Feed", fed > 0 and ("Fed " .. fed .. " fighter(s)") or "Nothing to feed (max level?)")
-end)
-
-every("Deconstruct", 30, function()
-    if not S("Deconstruct.AutoDeconstruct") then
-        setStatus("Deconstruct", "Disabled")
-        return
-    end
-
-    local data = Omni.Data
-    local inTeam = {}
-    for _, team in pairs(data.Fighters.Teams or {}) do
-        for id in pairs(team) do
-            inTeam[id] = true
-        end
-    end
-
-    local selection, count = {}, 0
-    for id, fighter in pairs(data.Fighters.List) do
-        local starSetting = data.Stars and data.Stars.Settings
-            and data.Stars.Settings[tostring(fighter.Name) .. (fighter.Shiny and " Shiny" or "")]
-        if starSetting and starSetting.State == "Auto Deconstruct"
-            and not fighter.Locked and not data.Fighters.Equipped[id] and not inTeam[id]
-            and (fighter.Level or 1) <= 1 then
-            selection[id] = true
-            count = count + 1
-        end
-    end
-    if count > 0 then
-        task.spawn(pcall, invoke, "Fighters", "Deconstruct", selection)
-    end
-    setStatus("Deconstruct", "Last pass: " .. count .. " fighter(s)")
 end)
 
 local function withCommas(number)
