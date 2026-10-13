@@ -2,7 +2,8 @@
 local SCRIPT_FILES = {
     [100342593906737] = "RNG%20Height.lua",
     [109949693269081] = "Tycoon%2C%20but%20one%20dropper%21.lua",
-    [106198175232796] = "FarmHub.lua"
+    [106198175232796] = "FarmHub.lua",
+    [78440417139286] = "Plant%20Incremental.lua"
 }
 local BASE_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/"
 local function notify(message)
