@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.12.9"
+local SCRIPT_VERSION = "2026.10.13.1"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -2653,6 +2653,27 @@ local function buildTabs()
     section = addSection(tab, 2, SHOP_NAME)
     addToggle(section, "Auto Buy ticked items", "Shop.AutoBuy", false, W)
     statusLabels.Shop = addLabel(section, "Disabled", COLORS.accent)
+    addButton(section, "Refresh Shop", function()
+        local ok, reason = pcall(function()
+            local price = Omni.Shared.Merchant.GetRestockPrice(SHOP_NAME)
+            local owned = Omni.Shared.Upgrade.GetPriceAmount(Omni.Data, price)
+            if owned < price.Amount then
+                setStatus("Shop", "Refresh needs " .. commas(price.Amount) .. " " .. price.Name)
+                return
+            end
+            Omni.Signal:FireSelf("Interface", "Confirmation", "Start", {
+                Title = "Refresh Adventurer Shop",
+                Description = "Spend " .. commas(price.Amount) .. " " .. price.Name .. " to refill every item?",
+                ConfirmText = "Refresh",
+                CancelText = "Cancel",
+                Callback = function()
+                    fire("Merchant", "RestockAll", SHOP_NAME)
+                    setStatus("Shop", "Shop refresh requested")
+                end
+            })
+        end)
+        if not ok then setStatus("Shop", "Refresh failed: " .. tostring(reason)) end
+    end)
     addSubHeader(section, "Items to buy")
     local products = {}
     pcall(function()
