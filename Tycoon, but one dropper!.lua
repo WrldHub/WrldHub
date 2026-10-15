@@ -18,6 +18,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local env = getgenv and getgenv() or _G
 local previous = env.OneDropperAutoBuy
 local saved = previous and {
+    antiAfkEnabled = previous.antiAfkEnabled ~= false,
     factoryObbyEnabled = previous.factoryObbyEnabled ~= false, powerObbyEnabled = previous.powerObbyEnabled ~= false,
     factoryObbyClaims = previous.factoryObbyClaims or 0, powerObbyClaims = previous.powerObbyClaims or 0,
     witchEnabled = previous.witchEnabled ~= false, witchItems = previous.witchItems or {}, witchBought = previous.witchBought or 0,
@@ -35,6 +36,7 @@ if previous and previous.Stop then previous.Stop() end
 local state = saved or {witchEnabled = true, witchItems = {}, witchBought = 0, crateEnabled = true, cratesCollected = 0, rebirthEnabled = true, rebirthsDone = 0, enabled = true, buyEnabled = true, candyEnabled = true,
     questsEnabled = true, achievementsEnabled = true, spinEnabled = true,
     bought = 0, candyCollected = 0, questsClaimed = 0, spinsUsed = 0}
+state.antiAfkEnabled = state.antiAfkEnabled ~= false
 state.factoryObbyEnabled = state.factoryObbyEnabled ~= false
 state.powerObbyEnabled = state.powerObbyEnabled ~= false
 state.factoryObbyClaims, state.powerObbyClaims = state.factoryObbyClaims or 0, state.powerObbyClaims or 0
@@ -86,6 +88,18 @@ local function connect(signal, callback)
     connections[#connections + 1] = c
     return c
 end
+local function antiAfkPulse()
+    if not state.alive or not state.antiAfkEnabled then return false end
+    local ok, reason = pcall(function()
+        local virtualUser = game:GetService("VirtualUser")
+        virtualUser:CaptureController()
+        virtualUser:ClickButton2(Vector2.zero)
+    end)
+    state.antiAfkStatus = ok and "Anti AFK active" or ("Anti AFK error: " .. tostring(reason))
+    return ok, reason
+end
+state.AntiAfkPulse = antiAfkPulse
+connect(player.Idled, antiAfkPulse)
 local function setSetting(key, value) settings[key] = value end
 local function getSetting(key, default)
     if settings[key] == nil then settings[key] = default end
@@ -709,13 +723,15 @@ addLabel(section, "30 minutes of cash + 2x cash for 15 minutes. Repeats when the
 local powerObbyLabel = addLabel(section, "")
 addLabel(section, "Visits each reward when ready, then returns you to your previous position.", COLORS.dim)
 section = addSection(options, 1, "Controls")
+addToggle(section, "Anti AFK", "antiAfkEnabled", state.antiAfkEnabled, function(v) state.antiAfkEnabled = v end)
+addLabel(section, "Responds to Roblox idle checks while the hub is loaded.", COLORS.dim)
 addToggle(section, "Run Automation", "enabled", state.enabled, function(v) state.enabled = v end)
 menuKey.button = addButton(section, "Menu key: RightShift (click to change)", function()
     menuKey.capturing = true
     menuKey.button.Text = "Press a key (Esc cancels)"
 end)
 addButton(section, "Stop All Features", function()
-    for _, key in ipairs({"factoryObbyEnabled", "powerObbyEnabled", "buyEnabled", "witchEnabled", "crateEnabled", "rebirthEnabled", "candyEnabled", "questsEnabled", "achievementsEnabled", "spinEnabled"}) do
+    for _, key in ipairs({"antiAfkEnabled", "factoryObbyEnabled", "powerObbyEnabled", "buyEnabled", "witchEnabled", "crateEnabled", "rebirthEnabled", "candyEnabled", "questsEnabled", "achievementsEnabled", "spinEnabled"}) do
         state[key] = false
         allToggles[key].set(false)
     end
