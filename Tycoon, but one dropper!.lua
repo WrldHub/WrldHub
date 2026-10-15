@@ -18,6 +18,8 @@ local playerGui = player:WaitForChild("PlayerGui")
 local env = getgenv and getgenv() or _G
 local previous = env.OneDropperAutoBuy
 local saved = previous and {
+    factoryObbyEnabled = previous.factoryObbyEnabled ~= false, powerObbyEnabled = previous.powerObbyEnabled ~= false,
+    factoryObbyClaims = previous.factoryObbyClaims or 0, powerObbyClaims = previous.powerObbyClaims or 0,
     witchEnabled = previous.witchEnabled ~= false, witchItems = previous.witchItems or {}, witchBought = previous.witchBought or 0,
     crateEnabled = previous.crateEnabled ~= false, cratesCollected = previous.cratesCollected or 0,
     rebirthEnabled = previous.rebirthEnabled ~= false, rebirthsDone = previous.rebirthsDone or 0,
@@ -33,6 +35,10 @@ if previous and previous.Stop then previous.Stop() end
 local state = saved or {witchEnabled = true, witchItems = {}, witchBought = 0, crateEnabled = true, cratesCollected = 0, rebirthEnabled = true, rebirthsDone = 0, enabled = true, buyEnabled = true, candyEnabled = true,
     questsEnabled = true, achievementsEnabled = true, spinEnabled = true,
     bought = 0, candyCollected = 0, questsClaimed = 0, spinsUsed = 0}
+state.factoryObbyEnabled = state.factoryObbyEnabled ~= false
+state.powerObbyEnabled = state.powerObbyEnabled ~= false
+state.factoryObbyClaims, state.powerObbyClaims = state.factoryObbyClaims or 0, state.powerObbyClaims or 0
+state.obbyStatus = {}
 state.alive, state.status = true, "Starting"
 env.OneDropperAutoBuy = state
 local alive, cleanedUp = true, false
@@ -652,6 +658,7 @@ favorites.empty = addLabel(addSection(favorites.tab, 1, "Favorites"), "Star a se
 local tycoon = addTab("Tycoon")
 local halloween = addTab("Halloween")
 local rewards = addTab("Rewards")
+local obbies = addTab("Obbies")
 local options = addTab("Settings")
 local section = addSection(main, 1, "Activity")
 local activityLabel = addLabel(section, "Starting")
@@ -692,6 +699,15 @@ section = addSection(rewards, 2, "Lucky Wheel")
 addToggle(section, "Auto Use Available Spins", "spinEnabled", state.spinEnabled, function(v) state.spinEnabled = v end)
 addLabel(section, "Uses free and already available spins when ready.", COLORS.dim)
 local wheelLabel = addLabel(section, "")
+section = addSection(obbies, 1, "Factory Tower")
+addToggle(section, "Auto Factory Tower Reward", "factoryObbyEnabled", state.factoryObbyEnabled, function(v) state.factoryObbyEnabled = v end)
+addLabel(section, "20 minutes of cash + 2x cash for 10 minutes. Repeats when the 20-minute cooldown ends.", COLORS.dim)
+local factoryObbyLabel = addLabel(section, "")
+section = addSection(obbies, 2, "Power Plant")
+addToggle(section, "Auto Power Plant Reward", "powerObbyEnabled", state.powerObbyEnabled, function(v) state.powerObbyEnabled = v end)
+addLabel(section, "30 minutes of cash + 2x cash for 15 minutes. Repeats when the 30-minute cooldown ends.", COLORS.dim)
+local powerObbyLabel = addLabel(section, "")
+addLabel(section, "Visits each reward when ready, then returns you to your previous position.", COLORS.dim)
 section = addSection(options, 1, "Controls")
 addToggle(section, "Run Automation", "enabled", state.enabled, function(v) state.enabled = v end)
 menuKey.button = addButton(section, "Menu key: RightShift (click to change)", function()
@@ -699,7 +715,7 @@ menuKey.button = addButton(section, "Menu key: RightShift (click to change)", fu
     menuKey.button.Text = "Press a key (Esc cancels)"
 end)
 addButton(section, "Stop All Features", function()
-    for _, key in ipairs({"buyEnabled", "witchEnabled", "crateEnabled", "rebirthEnabled", "candyEnabled", "questsEnabled", "achievementsEnabled", "spinEnabled"}) do
+    for _, key in ipairs({"factoryObbyEnabled", "powerObbyEnabled", "buyEnabled", "witchEnabled", "crateEnabled", "rebirthEnabled", "candyEnabled", "questsEnabled", "achievementsEnabled", "spinEnabled"}) do
         state[key] = false
         allToggles[key].set(false)
     end
@@ -729,6 +745,13 @@ local function render()
         .. "\nCash: $" .. formatNumber(player:GetAttribute("Cash"))
         .. " / $" .. formatNumber(player:GetAttribute("RebirthCost"))
         .. "\nRebirths this session: " .. formatNumber(state.rebirthsDone)
+    local function obbyText(attribute, key, count)
+        local seconds = math.max(0, math.ceil((player:GetAttribute(attribute) or 0) - workspace:GetServerTimeNow()))
+        return (seconds > 0 and string.format("Next reward: %d:%02d", seconds // 60, seconds % 60) or "Reward ready")
+            .. "\n" .. (state.obbyStatus[key] or "Waiting") .. "\nRewards claimed: " .. formatNumber(count)
+    end
+    factoryObbyLabel.Text = obbyText("ObbyNext", "factory", state.factoryObbyClaims)
+    powerObbyLabel.Text = obbyText("PowerNext", "power", state.powerObbyClaims)
     local remaining = math.max(0, (player:GetAttribute("WheelNext") or 0) - math.floor(workspace:GetServerTimeNow()))
     wheelLabel.Text = "Available spins: " .. formatNumber(player:GetAttribute("WheelSpins"))
         .. "\nNext free spin: " .. (remaining == 0 and "Ready" or string.format("%d:%02d", remaining // 60, remaining % 60))
@@ -772,6 +795,58 @@ connections[#connections + 1] = remotes.Net.OnClientEvent:Connect(function(kind,
         render()
     end
 end)
+local obbyRetry = {}
+local obbyDefinitions = {
+    {id="factory", name="Factory Tower", enabled="factoryObbyEnabled", attribute="ObbyNext",
+        model="Obby", dropper="GoldenDropper", counter="factoryObbyClaims"},
+    {id="power", name="Power Plant", enabled="powerObbyEnabled", attribute="PowerNext",
+        model="PowerPlant", dropper="DiamondDropper", counter="powerObbyClaims"}
+}
+local function collectObby(root)
+    for _,definition in ipairs(obbyDefinitions) do
+        local now = workspace:GetServerTimeNow()
+        if not state[definition.enabled] then
+            state.obbyStatus[definition.id] = "Disabled"
+        elseif (player:GetAttribute(definition.attribute) or 0) > now then
+            state.obbyStatus[definition.id] = "Waiting for cooldown"
+        elseif os.clock() >= (obbyRetry[definition.id] or 0) then
+            local world = workspace:FindFirstChild("World")
+            local model = world and world:FindFirstChild(definition.model)
+            local dropper = model and model:FindFirstChild(definition.dropper)
+            local target = dropper and dropper:FindFirstChild("Reward")
+            if not target or not target:IsA("BasePart") then
+                state.obbyStatus[definition.id] = "Waiting for reward area"
+            else
+                obbyRetry[definition.id] = os.clock() + 15
+                state.status = "Collecting " .. definition.name .. " reward"
+                state.obbyStatus[definition.id] = "Collecting reward"
+                state.root, state.origin = root, root.CFrame
+                local before = player:GetAttribute(definition.attribute) or 0
+                root.CFrame = target.CFrame * CFrame.new(0, 2, 0)
+                root.AssemblyLinearVelocity = Vector3.zero
+                if type(firetouchinterest) == "function" then
+                    firetouchinterest(root, target, 0)
+                    task.wait(.15)
+                    if root.Parent and target.Parent then firetouchinterest(root, target, 1) end
+                end
+                local deadline = os.clock() + 2
+                repeat task.wait(.1) until not state.alive or not state.enabled or not state[definition.enabled]
+                    or not root.Parent or (player:GetAttribute(definition.attribute) or 0) > before or os.clock() >= deadline
+                if (player:GetAttribute(definition.attribute) or 0) > before then
+                    state[definition.counter] += 1
+                    state.obbyStatus[definition.id] = "Reward collected"
+                    print("FASTHUB_OBBY_REWARD_CONFIRMED", definition.name, player:GetAttribute(definition.attribute))
+                else
+                    state.obbyStatus[definition.id] = "Reward pending; retrying shortly"
+                end
+                restore()
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function collectPail(root)
     if not state.candyEnabled or workspace:GetAttribute("HalloweenOn") ~= true or os.clock() < pailRetry then return false end
     local model = workspace:FindFirstChild("CandyPail")
@@ -905,6 +980,7 @@ state.thread = task.spawn(function()
                 local root = character and character:FindFirstChild("HumanoidRootPart")
                 local humanoid = character and character:FindFirstChildOfClass("Humanoid")
                 if not root or not humanoid or humanoid.Health <= 0 then state.status = "Waiting for character"; return end
+                if collectObby(root) then return end
                 if collectCrate(root) then return end
                 if collectPail(root) then return end
                 local rebirthCost = player:GetAttribute("RebirthCost")
