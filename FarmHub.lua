@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.16.3"
+local SCRIPT_VERSION = "2026.10.17.1"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -2606,6 +2606,72 @@ function hubMain.wishDefaults()
     return order
 end
 
+-- Manual rolls for a pinned weapon; locked entries count toward the three-breathing goal.
+hubMain.tripleWeaponIds = {}
+function hubMain.breathingCount(weapon)
+    local count, locked = 0, 0
+    for _, entry in pairs(weapon and weapon.Breathings and weapon.Breathings.Current or {}) do
+        if type(entry) == "table" and type(entry.Name) == "string" and entry.Name ~= "" then
+            count += 1
+            if entry.Locked then locked += 1 end
+        end
+    end
+    return count, locked
+end
+function hubMain.tripleWeaponOptions()
+    local labels = {"Game Menu Selection", "Equipped Weapon"}
+    local weapons = {}
+    hubMain.tripleWeaponIds = {}
+    for id, weapon in pairs(Omni.Data.Weapons.List or {}) do
+        if weapon.Name ~= "Melee" then
+            local label = tostring(weapon.Name) .. " Lv " .. tostring(weapon.Level or 1) .. " #" .. string.sub(id, 1, 8)
+            weapons[#weapons + 1] = label
+            hubMain.tripleWeaponIds[label] = id
+        end
+    end
+    table.sort(weapons)
+    for _, label in ipairs(weapons) do labels[#labels + 1] = label end
+    return labels
+end
+function hubMain.tripleSelectedWeapon()
+    local choice = S("Slayers.TripleWeapon")
+    if choice == "Equipped Weapon" then return Omni.Data.Weapons.Equipped end
+    if choice ~= "Game Menu Selection" then return hubMain.tripleWeaponIds[choice] end
+    local ok, ui = pcall(require, player.PlayerScripts.Omni.Scripts.Interface.Breathings)
+    if ok and type(ui.RefreshUI) == "function" and type(getupvalues) == "function" then
+        for _, value in pairs(getupvalues(ui.RefreshUI)) do
+            if type(value) == "string" and Omni.Data.Weapons.List[value] then return value end
+        end
+    end
+    return nil
+end
+function hubMain.stopTriple(message)
+    hubMain.tripleId, hubMain.triplePending = nil, nil
+    settings["Slayers.TriplePinnedId"] = nil
+    if allToggles["Slayers.RollUntilThree"] then allToggles["Slayers.RollUntilThree"].set(false, true) end
+    setStatus("TripleBreathings", message)
+end
+function hubMain.startTriple(value)
+    hubMain.triplePending = nil
+    if not value then hubMain.tripleId = nil;settings["Slayers.TriplePinnedId"] = nil;setStatus("TripleBreathings", "Stopped");return end
+    local id = S("Slayers.TriplePinnedId") or hubMain.tripleSelectedWeapon()
+    local weapon = id and Omni.Data.Weapons.List[id]
+    if not weapon then hubMain.stopTriple("Select a weapon first");return end
+    hubMain.tripleId, hubMain.tripleRolls = id, 0
+    settings["Slayers.TriplePinnedId"] = id
+    if allToggles["Slayers.AutoBreathings"] then allToggles["Slayers.AutoBreathings"].set(false) end
+    pcall(function()
+        local ui = require(player.PlayerScripts.Omni.Scripts.Interface.Breathings)
+        ui.CancelAuto()
+    end)
+    local count = hubMain.breathingCount(weapon)
+    if count >= 3 then
+        hubMain.stopTriple(tostring(weapon.Name) .. " already has 3 breathings; no rolls spent")
+    else
+        setStatus("TripleBreathings", "Rolling " .. tostring(weapon.Name) .. ": " .. count .. "/3 breathings")
+    end
+end
+
 local function buildTabs()
     local tab, section
     -- Main
@@ -2752,7 +2818,21 @@ local function buildTabs()
 
     section = addSection(tab, 2, "Slayers Village")
     addToggle(section, "Auto Progression", "Slayers.AutoProgression", false, W)
-    addToggle(section, "Auto Breathings", "Slayers.AutoBreathings", false, W)
+    addToggle(section, "Auto Breathings", "Slayers.AutoBreathings", false, function(value)
+        if value and S("Slayers.RollUntilThree") then hubMain.stopTriple("Stopped: normal Auto Breathings enabled") end
+    end)
+    addSubHeader(section, "Roll until three breathings")
+    hubMain.tripleDropdown = addDropdown(section, "Weapon to roll", "Slayers.TripleWeapon",
+        hubMain.tripleWeaponOptions(), "Game Menu Selection", function()
+            if S("Slayers.RollUntilThree") then hubMain.stopTriple("Weapon changed; enable again to start") end
+        end)
+    addButton(section, "Refresh weapon list", function()
+        hubMain.tripleDropdown.setOptions(hubMain.tripleWeaponOptions())
+    end)
+    addToggle(section, "Roll Until 3 Breathings", "Slayers.RollUntilThree", false, hubMain.startTriple)
+    statusLabels.TripleBreathings = addLabel(section, "Stopped", COLORS.accent)
+    addLabel(section, "Uses manual rolls and stops at any 3 breathings, including locked ones. "
+        .. "Preserves locks and ignores rarity stop settings in this mode. The chosen weapon stays fixed until stopped.", COLORS.dim)
     addDropdown(section, "Stop at breathing", "Slayers.StopAt", sortedKeys(function()
         return Omni.Shared.Breathings.List
     end, "--"), "--", W)
@@ -4858,6 +4938,42 @@ local function rollReady(name)
     return os.clock() >= (nextRoll[name] or 0)
 end
 
+every("Three breathings", 0.25, function()
+    if not S("Slayers.RollUntilThree") then return end
+    local id = hubMain.tripleId
+    local data = Omni.Data
+    local weapon = id and data.Weapons.List[id]
+    if not weapon then hubMain.stopTriple("Selected weapon is unavailable");return end
+    local count, locked = hubMain.breathingCount(weapon)
+    if count >= 3 then
+        local message = tostring(weapon.Name) .. ": 3 breathings reached after " .. tostring(hubMain.tripleRolls or 0) .. " rolls. Stopped."
+        hubMain.stopTriple(message)
+        notify(message)
+        return
+    end
+    if locked >= count and count > 0 then hubMain.stopTriple("Unlock at least one breathing before rolling");return end
+    local price = Omni.Shared.Breathings.Price
+    local balance = price.Type == "Item" and (data.Items.List[price.Name] or 0)
+        or Omni.Shared.Upgrade.GetPriceAmount(data, price)
+    local pending = hubMain.triplePending
+    if pending then
+        if balance < pending.balance or (weapon.Breathings and weapon.Breathings.Current) ~= pending.current then
+            hubMain.triplePending = nil
+            nextRoll.Breathings = os.clock() + playerStat("BreathingsCooldown", 2) + 0.25
+        elseif os.clock() - pending.at > 10 then
+            hubMain.stopTriple("No roll confirmation received; stopped")
+        end
+        return
+    end
+    if not rollReady("Breathings") then return end
+    if balance < price.Amount then hubMain.stopTriple("Not enough " .. tostring(price.Name) .. "; stopped");return end
+    hubMain.triplePending = {balance = balance, current = weapon.Breathings and weapon.Breathings.Current, at = os.clock()}
+    hubMain.tripleRolls = (hubMain.tripleRolls or 0) + 1
+    nextRoll.Breathings = os.clock() + playerStat("BreathingsCooldown", 2) + 0.25
+    fire("Breathings", "Spin", id, nextRequest())
+    setStatus("TripleBreathings", tostring(weapon.Name) .. ": " .. count .. "/3 breathings | Rolls: " .. hubMain.tripleRolls)
+end)
+
 every("Rolls", 0.25, function()
     local data = Omni.Data
     for name, key in pairs({ Haki = "Heaven.AutoHaki", ["Cursed Technique"] = "Cursed.AutoCursedTechnique" }) do
@@ -4867,7 +4983,7 @@ every("Rolls", 0.25, function()
         end
     end
 
-    if S("Slayers.AutoBreathings") and rollReady("Breathings") then
+    if S("Slayers.AutoBreathings") and not S("Slayers.RollUntilThree") and rollReady("Breathings") then
         local weaponId = data.Weapons.Equipped
         local weapon = weaponId and data.Weapons.List[weaponId]
         if weapon then
