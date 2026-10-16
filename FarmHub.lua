@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.16.1"
+local SCRIPT_VERSION = "2026.10.16.2"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -125,6 +125,12 @@ if settings["Culling.Enabled"] == nil then
 end
 if settings["Culling.Role"] == nil then settings["Culling.Role"] = settings["Culling.AutoJoin"] and "Player" or "Host" end
 settings["Culling.AutoCulling"], settings["Culling.AutoJoin"] = false, false
+
+-- Add Dragon Defense without resetting an existing custom priority order.
+if type(settings["Priority.Order"]) == "table" and not table.find(settings["Priority.Order"], "Dragon Defense") then
+    local order = settings["Priority.Order"]
+    table.insert(order, table.find(order, "Quest") or table.find(order, "Mob Farm") or (#order + 1), "Dragon Defense")
+end
 
 -- Removed features must not resume from saved settings.
 for key in pairs(settings) do
@@ -1443,6 +1449,7 @@ end
 
 local ACTIVITIES = { "Trial", "Dungeon", "Culling" }
 local function activityOf(gamemode)
+    if gamemode == "Dragon Defense" then return "DragonDefense" end
     for _, activity in ipairs(ACTIVITIES) do
         if string.sub(gamemode, 1, #activity) == activity then
             return activity
@@ -1455,7 +1462,8 @@ end
 local ACTIVITY_TOGGLES = {
     Trial = { "Trial.AutoTrial" },
     Dungeon = { "Dungeon.AutoDungeon" },
-    Culling = { "Culling.Enabled" }
+    Culling = { "Culling.Enabled" },
+    DragonDefense = { "DragonDefense.Enabled" }
 }
 local function activityManaged(activity)
     for _, key in ipairs(ACTIVITY_TOGGLES[activity] or {}) do
@@ -1468,6 +1476,7 @@ end
 
 -- Position in the Priority list; lower numbers win.
 local function priorityRank(name)
+    if name == "DragonDefense" then name = "Dragon Defense" end
     return table.find(settings["Priority.Order"] or {}, name) or math.huge
 end
 
@@ -2436,6 +2445,8 @@ function hubMain.render()
         activity = busyBoss == worldBoss and ("World Boss\n" .. bossStatus(worldBoss)) or "Collecting lobby chests"
     elseif S("MobFarm.AutoFarm") then
         activity = "Mob Farm\n" .. statusLabels.MobFarm.Text
+    elseif S("DragonDefense.Enabled") then
+        activity = "Dragon Defense\n" .. statusLabels.DragonDefense.Text
     elseif S("Culling.Enabled") then
         activity = "Culling\n" .. statusLabels.Culling.Text
     elseif worldBoss.enabled then
@@ -2617,7 +2628,7 @@ local function buildTabs()
     section = addSection(tab, 2, "Priority")
     addToggle(section, "Leave for a higher priority", "Priority.LeaveForPriority", true, W)
     addPriorityList(section, "Priority.Order",
-        { "Trial", "Dungeon", "World Boss", "Culling", "Quest", "Mob Farm" }, "Activity to move")
+        { "Trial", "Dungeon", "World Boss", "Culling", "Dragon Defense", "Quest", "Mob Farm" }, "Activity to move")
 
     -- Gamemodes
     tab = addTab("Gamemodes")
@@ -2653,6 +2664,23 @@ local function buildTabs()
     addToggle(section, "Auto Leave at wave", "Culling.AutoLeave", false, W)
     addNumberBox(section, "Leave when this wave begins", "Culling.Wave", 6)
     addLabel(section, "Teleports once above each enemy. Minis first while the boss is shielded. Settings stay editable.", COLORS.dim)
+
+    section = addSection(tab, 2, "Dragon Defense")
+    statusLabels.DragonDefense = addLabel(section, "Disabled", COLORS.accent)
+    addDropdown(section, "Mode", "DragonDefense.Role", {"Host", "Player"}, "Host", W)
+    addToggle(section, "Auto Dragon Defense", "DragonDefense.Enabled", false, W)
+    addDropdown(section, "Difficulty", "DragonDefense.Difficulty", DIFFICULTIES, "Easy", W)
+    do
+        local playerSlider = addSlider(section, "Players needed (including you)", "DragonDefense.StartPlayers", 1, 10, 1)
+        env.FarmHubDragonDefensePlayerSlider = playerSlider
+    end
+    addTextBox(section, "Player mode: host username / user ID", "DragonDefense.Host", "", "Blank = any public lobby")
+    addToggle(section, "Teleport + auto attack", "DragonDefense.TeleportToEnemies", true, W)
+    addToggle(section, "Auto Leave at wave", "DragonDefense.AutoLeave", false, W)
+    addSlider(section, "Leave when this wave begins", "DragonDefense.Wave", 1, 50, 50)
+    addLabel(section, "Uses the Culling party flow. Host costs 1 Saiyan Key per run; up to 10 players. "
+        .. "Completes all 50 waves unless leave-wave is enabled, then repeats. Follows moving enemies and pauses mob farming. "
+        .. "Turn this on to farm Ball 7 while Dragon Ball farming handles the other balls.", COLORS.dim)
 
     -- Worlds
     tab = addTab("Worlds")
@@ -2702,7 +2730,7 @@ local function buildTabs()
     statusLabels.DragonWish = addLabel(section, "", COLORS.accent)
     addPriorityList(section, "Dragon.WishOrder", hubMain.wishDefaults(), "Wish to move")
     addLabel(section, "Hunts only the enemies whose ball you are missing (Secret and Boss first) and pauses "
-        .. "Mob Farm meanwhile. Ball 7 only drops from Dragon Defense, which the hub does not run. "
+        .. "Mob Farm meanwhile. Ball 7 drops from Dragon Defense; enable it in Gamemodes to farm that ball. "
         .. "Shenron's offer is answered with the highest wish in this list.", COLORS.dim)
 
     -- Quests and rewards
@@ -2841,7 +2869,7 @@ local function buildTabs()
             if settings[key] == true and string.sub(key, 1, 8) ~= "Session."
                 and string.sub(key, 1, 8) ~= "Webhook." and string.sub(key, 1, 9) ~= "Shop.Buy."
                 and key ~= "Bosses.PauseInGamemode" and key ~= "Bosses.ReturnAfterBoss" and key ~= "Priority.LeaveForPriority"
-                and key ~= "Culling.TeleportToEnemies" then
+                and key ~= "Culling.TeleportToEnemies" and key ~= "DragonDefense.TeleportToEnemies" then
                 toggle.set(false)
             end
         end
@@ -3232,10 +3260,14 @@ end)
 local GAMEMODES = {
     Trial = { toggle = "Trial.AutoTrial", scheduled = true },
     Dungeon = { toggle = "Dungeon.AutoDungeon", scheduled = true },
-    Culling = { toggle = "Culling.Enabled", scheduled = false }
+    Culling = { toggle = "Culling.Enabled", scheduled = false },
+    DragonDefense = { toggle = "DragonDefense.Enabled", scheduled = false }
 }
 
+GAMEMODES["Dragon Defense"] = GAMEMODES.DragonDefense
+
 local function gamemodeName(activity)
+    if activity == "DragonDefense" then return "Dragon Defense" end
     if activity == "Culling" then
         return S("Culling.Gamemode")
     end
@@ -3313,7 +3345,7 @@ every("Gamemodes", 1, function()
     if current then
         local activity = activityOf(current)
         if not activity or not activityManaged(activity) then return nil end
-        if activity == "Culling" then return nil end -- The ported coordinator owns leaving and priority pauses.
+        if activity == "Culling" or activity == "DragonDefense" then return nil end -- The ported coordinator owns leaving and priority pauses.
 
         -- Wave checks wait until the run has been going long enough for the HUD to refresh.
         local wave, total = readWave()
@@ -3476,7 +3508,7 @@ local _combatNote = ""
 every("Gamemode Combat", 0.4, function()
     local current = currentGamemode()
     local activity = current and activityOf(current)
-    if not activity or activity == "Culling" then
+    if not activity or activity == "Culling" or activity == "DragonDefense" then
         hubMain.combatTarget = nil
         dungeonDoors.emptySince = nil
         _combatNote = ""
@@ -3843,7 +3875,7 @@ end
     local currentParty, received = nil, false
     local parties = Omni.Scripts.General.Parties
     local function includesYou(party)
-        if type(party) ~= "table" then return false end
+        if type(party) ~= "table" or party.GamemodeName ~= "Culling Game" then return false end
         for _, id in ipairs(party.MemberOrder or {}) do if tostring(id) == tostring(player.UserId) then return true end end
         return false
     end
@@ -3871,8 +3903,10 @@ end
                 end
             end
         end
-        cullingLobby = includesYou(currentParty)
-        if cullingLobby then state.ownsLobby = true end
+        hubMain.partyLobbies = hubMain.partyLobbies or {}
+        hubMain.partyLobbies["Culling"] = includesYou(currentParty)
+        cullingLobby = hubMain.partyLobbies.Culling == true or hubMain.partyLobbies.DragonDefense == true
+        if includesYou(currentParty) then state.ownsLobby = true end
         return currentParty
     end
     local function higherPriority()
@@ -3880,6 +3914,7 @@ end
         for _, other in ipairs({"Dungeon", "Trial"}) do
             if S(GAMEMODES[other].toggle) and priorityRank(other) < priorityRank("Culling") and isOpen(other) then return other end
         end
+        if S("DragonDefense.Enabled") and priorityRank("DragonDefense") < priorityRank("Culling") then return "DragonDefense" end
         if worldBoss.enabled and priorityRank("World Boss") < priorityRank("Culling")
             and (busyBoss == worldBoss or worldBoss.phase == "gamemode" or worldBoss.phase == "queued"
                 or worldBoss.phase == "teleporting" or worldBoss.phase == "holding"
@@ -4043,7 +4078,10 @@ end
                     leaveGamemode(reason and (reason .. " has priority") or "Culling disabled")
                 end
             elseif state.ownsLobby and includesYou(currentParty) then
-                state.ownsLobby, cullingLobby = false, false
+                state.ownsLobby = false
+                hubMain.partyLobbies = hubMain.partyLobbies or {}
+                hubMain.partyLobbies["Culling"] = false
+                cullingLobby = hubMain.partyLobbies.Culling == true or hubMain.partyLobbies.DragonDefense == true
                 fire("Parties", "Leave")
                 currentParty = nil
             end
@@ -4071,6 +4109,555 @@ end
     end)
 end
 -- END_PORTED_CULLING
+
+-- BEGIN_PORTED_DRAGON_DEFENSE
+do
+local function runAutomation(api, settings)
+    local MODE = "Dragon Defense"
+    local cycles = 0
+
+    local function countMembers(party)
+        local seen, count, includesYou = {}, 0, false
+        for _, id in ipairs(party.MemberOrder or {}) do
+            local key = tostring(id)
+            if not seen[key] then
+                seen[key] = true
+                count = count + 1
+            end
+            if key == tostring(api.userId) then includesYou = true end
+        end
+        return count, includesYou
+    end
+
+    local function ownLobby(party)
+        if type(party) ~= "table" or party.GamemodeName ~= MODE then return false end
+        local _, includesYou = countMembers(party)
+        return includesYou and tostring(party.Leader) == tostring(api.userId)
+    end
+
+    local function session()
+        local data = api.data()
+        if data.Gamemode == MODE and data.GamemodeSession ~= nil
+            and data.GamemodeSession ~= false and data.GamemodeSession ~= "" then
+            return tostring(data.GamemodeSession)
+        end
+        return nil
+    end
+
+    local function report(message, members, wave)
+        api.report(message, {members = members, wave = wave, cycles = cycles})
+    end
+
+    local function send(section, action, ...)
+        if not api.alive() then return false end
+        api.fire(section, action, ...)
+        return true
+    end
+
+    local function waitFor(predicate, seconds, failure)
+        local deadline = api.now() + seconds
+        while api.alive() do
+            local value = predicate()
+            if value then return value end
+            if api.now() >= deadline then error(failure, 0) end
+            if not api.sleep(0.2) then return nil end
+        end
+        return nil
+    end
+
+    local function matchesHost(party)
+        if type(party) ~= "table" or party.ID == nil then return false end
+        if party.GamemodeName and party.GamemodeName ~= MODE then return false end
+        if tostring(party.Leader) == tostring(api.userId) then return false end
+        return settings.hostUserId == nil or tostring(party.Leader) == tostring(settings.hostUserId)
+    end
+
+    local function waitForHost(partyId)
+        local missingSince = nil
+        while api.alive() do
+            local activeSession = session()
+            if activeSession then return activeSession end
+            local party = api.party()
+            if party then
+                local members, includesYou = countMembers(party)
+                if not includesYou or party.ID ~= partyId or not matchesHost(party) then
+                    error("Your party/host changed. Stop, leave that party, and try again.", 0)
+                end
+                missingSince = nil
+                report("Joined " .. (party.Difficulty or MODE) .. " lobby. Waiting for the host to start...", members, 0)
+            else
+                missingSince = missingSince or api.now()
+                -- Party removal can arrive before the match data when the host starts.
+                if api.now() - missingSince >= 5 then return nil end
+                report("Lobby changed. Waiting for the match or the host's next lobby...", 0, 0)
+            end
+            if not api.sleep(0.2) then return nil end
+        end
+        return nil
+    end
+
+    local function joinPlayerLobby()
+        local attemptedAt = {}
+        while api.alive() do
+            local activeSession = session()
+            if activeSession then return activeSession end
+            local party = api.party()
+            if party then
+                local _, includesYou = countMembers(party)
+                if not includesYou or not matchesHost(party) then
+                    error("Leave your current party first, or choose its host in Player mode.", 0)
+                end
+                activeSession = waitForHost(party.ID)
+                if activeSession then return activeSession end
+            else
+                report(settings.hostUserId and "Looking for the selected host's public lobby..."
+                    or "Looking for an open Dragon Defense lobby...", 0, 0)
+                local lobbies = api.browse()
+                if not api.alive() then return nil end
+                -- A lobby or session may have arrived while Browse was in flight.
+                activeSession = session()
+                if activeSession then return activeSession end
+                if not api.party() then
+                    local candidates = {}
+                    for _, lobby in pairs(lobbies) do
+                        local members = type(lobby) == "table" and countMembers(lobby) or 0
+                        local capacity = type(lobby) == "table" and (tonumber(lobby.MaxMembers) or api.maxMembers) or 0
+                        if matchesHost(lobby) and members < capacity
+                            and (lobby.Visibility == nil or lobby.Visibility == "Public")
+                            and api.now() - (attemptedAt[tostring(lobby.ID)] or -math.huge) >= 5 then
+                            table.insert(candidates, lobby)
+                        end
+                    end
+                    table.sort(candidates, function(left, right) return tostring(left.ID) < tostring(right.ID) end)
+                    local target = candidates[1]
+                    if target then
+                        api.checkEntry("Player")
+                        report("Joining the host's Dragon Defense lobby...", countMembers(target), 0)
+                        attemptedAt[tostring(target.ID)] = api.now()
+                        if not send("Parties", "Join", target.ID) then return nil end
+                        local deadline = api.now() + 10
+                        while api.alive() and api.now() < deadline do
+                            activeSession = session()
+                            if activeSession then return activeSession end
+                            local joined = api.party()
+                            if joined then
+                                local _, includesYou = countMembers(joined)
+                                if not includesYou or joined.ID ~= target.ID or not matchesHost(joined) then
+                                    error("You joined a different party. Check the selected host.", 0)
+                                end
+                                activeSession = waitForHost(joined.ID)
+                                if activeSession then return activeSession end
+                                break
+                            end
+                            if not api.sleep(0.2) then return nil end
+                        end
+                    end
+                end
+            end
+            if not api.sleep(2) then return nil end
+        end
+        return nil
+    end
+
+    while api.alive() do
+        if api.refreshSettings then api.refreshSettings(settings) end
+        local activeSession = session()
+        if not activeSession then
+            local mode = api.data().Gamemode
+            if mode and mode ~= "" and mode ~= MODE then
+                error("Leave your current gamemode, then press Start again.", 0)
+            end
+            if settings.role == "Player" then
+                api.checkEntry("Player")
+                activeSession = joinPlayerLobby()
+                if not activeSession then return end
+            else
+                api.checkEntry("Host")
+                local party = api.party()
+                if party and not ownLobby(party) then
+                    error("Leave your current party first. You must host the Dragon Defense lobby.", 0)
+                end
+
+                if not party then
+                    report("Creating a public Dragon Defense lobby...", 0, 0)
+                    if not send("Parties", "Create", MODE) then return end
+                    party = waitFor(function()
+                        local candidate = api.party()
+                        if candidate and not ownLobby(candidate) then
+                            error("You joined a different party. Stop and leave it before trying again.", 0)
+                        end
+                        return candidate
+                    end, 20, "Lobby creation was not confirmed. Check the game's notification and entry requirements.")
+                    if not party then return end
+                end
+
+                local partyId = party.ID
+                if settings.requiredPlayers > (tonumber(party.MaxMembers) or api.maxMembers) then
+                    error("Selected player count exceeds this lobby's capacity.", 0)
+                end
+                local function sameLobby()
+                    local latest = api.party()
+                    if not ownLobby(latest) or latest.ID ~= partyId then
+                        error("The lobby was closed, you left, or you are no longer the host.", 0)
+                    end
+                    return latest
+                end
+
+                report("Applying " .. settings.difficulty .. " difficulty and public visibility...", countMembers(party), 0)
+                if party.Difficulty ~= settings.difficulty then
+                    if not send("Parties", "SetDifficulty", settings.difficulty) then return end
+                end
+                if party.Visibility ~= "Public" then
+                    if not send("Parties", "SetVisibility", "Public") then return end
+                end
+                party = waitFor(function()
+                    local latest = sameLobby()
+                    return latest.Difficulty == settings.difficulty and latest.Visibility == "Public" and latest
+                end, 12, "The server did not confirm the difficulty/public setting. Check the game's notification.")
+                if not party then return end
+
+                local soloSince, waitingTarget = nil, settings.requiredPlayers
+                while api.alive() do
+                    party = sameLobby()
+                    local members = countMembers(party)
+                    local required = settings.requiredPlayers
+                    if required ~= waitingTarget then
+                        soloSince, waitingTarget = nil, required
+                    end
+                    if members >= required then break end
+                    local countdown = ""
+                    if required >= 2 and members == 1 then
+                        soloSince = soloSince or api.now()
+                        local remaining = math.max(0, 60 - (api.now() - soloSince))
+                        if remaining <= 0 then
+                            if not api.alive() then return end
+                            if api.setRequiredPlayers then api.setRequiredPlayers(1)
+                            else settings.requiredPlayers = 1 end
+                            report("No one joined for 1 minute. Player requirement set to 1; starting solo.", members, 0)
+                            break
+                        end
+                        countdown = " | Solo start in " .. math.ceil(remaining) .. "s"
+                    else
+                        soloSince = nil
+                    end
+                    report("Waiting for players: " .. members .. " / " .. required .. " (including you)" .. countdown, members, 0)
+                    if not api.sleep(0.2) then return end
+                end
+                if not api.alive() then return end
+
+                party = sameLobby()
+                if party.Difficulty ~= settings.difficulty or party.Visibility ~= "Public" then
+                    error("Lobby settings changed. Stop, check them, and press Start again.", 0)
+                end
+                api.checkEntry("Host")
+                report("Starting " .. settings.difficulty .. " Dragon Defense...", countMembers(party), 0)
+                if not send("Parties", "Start") then return end
+                activeSession = waitFor(session, 25,
+                    "The match did not start. Check the game's notification; no duplicate Start was sent.")
+                if not activeSession then return end
+            end
+        end
+
+        local lastWaveRead = api.now()
+        while api.alive() and session() == activeSession do
+            local wave = api.wave(activeSession)
+            if type(wave) == "number" then
+                lastWaveRead = api.now()
+                report(settings.role == "Player" and "In Dragon Defense - Player"
+                    or "In Dragon Defense - " .. settings.difficulty, nil, wave)
+                if settings.autoLeave and wave >= settings.leaveWave then
+                    report("Reached wave " .. wave .. ". Leaving the match...", nil, wave)
+                    if not send("Gamemodes", "Leave") then return end
+                    local left = waitFor(function()
+                        return session() ~= activeSession
+                    end, 25, "Leaving was not confirmed. Automation stopped; check the game.")
+                    if not left then return end
+                    break
+                end
+            else
+                report("Waiting for the match's wave counter...", nil, nil)
+                if api.now() - lastWaveRead > 30 then
+                    error("The wave counter is unavailable. Automation stopped.", 0)
+                end
+            end
+            if api.step and api.alive() and session() == activeSession then api.step(activeSession) end
+            if not api.sleep(0.2) then return end
+        end
+        if not api.alive() then return end
+        cycles = cycles + 1
+        report(settings.role == "Player" and "Match ended. Looking for the host again in 3 seconds..."
+            or "Match ended. Creating the next lobby in 3 seconds...", 0, 0)
+        if not api.sleep(3) then return end
+    end
+end
+
+local function pickTarget(candidates, collectChests)
+    local best, bestRank = nil, math.huge
+    for _, enemy in ipairs(candidates) do
+        if not enemy.dead and (collectChests or not enemy.chest) then
+            local rank = (enemy.chest and 0 or 1) * 1000000 + enemy.distance
+            if rank < bestRank then best, bestRank = enemy, rank end
+        end
+    end
+    return best
+end
+
+local function pickDragonDefenseTarget(current, candidates)
+    local minis, bosses = {}, {}
+    for _, enemy in ipairs(candidates) do
+        if not enemy.dead and enemy.alive ~= false and not enemy.shielded then
+            table.insert(enemy.boss and bosses or minis, enemy)
+        end
+    end
+    local pool = #minis > 0 and minis or bosses
+    -- Use the fresh candidate so a newly applied shield is never cached away.
+    for _, enemy in ipairs(pool) do
+        if current and enemy.id == current.id and enemy.object == current.object then return enemy end
+    end
+    return pickTarget(pool, true)
+end
+
+
+    local state: {[string]: any} = {cycles = 0, token = 0, worker = nil, ownsRun = false, ownsLobby = false}
+    env.FarmHubDragonDefense = state
+    local currentParty, received = nil, false
+    local parties = Omni.Scripts.General.Parties
+    local function includesYou(party)
+        if type(party) ~= "table" or party.GamemodeName ~= "Dragon Defense" then return false end
+        for _, id in ipairs(party.MemberOrder or {}) do if tostring(id) == tostring(player.UserId) then return true end end
+        return false
+    end
+    connect(parties.SyncEvent, function(party)
+        received = true
+        if includesYou(party) then currentParty = party
+        elseif currentParty and type(party) == "table" and party.ID == currentParty.ID then currentParty = nil end
+    end)
+    local function clearParty(id)
+        received = true
+        if currentParty and currentParty.ID == id then currentParty = nil end
+    end
+    for _, event in ipairs({parties.LeftEvent, parties.DisbandedEvent, parties.KickedEvent}) do
+        if event then connect(event, clearParty) end
+    end
+    local controller
+    pcall(function() controller = require(player.PlayerScripts.Omni.Scripts.Interface.Gamemodes.Controller) end)
+    local function partySnapshot()
+        if not received and controller and type(getupvalues) == "function" then
+            for _, callback in ipairs({controller.OnSync, controller.OnLeft}) do
+                if type(callback) == "function" then
+                    for _, value in pairs(getupvalues(callback)) do
+                        if includesYou(value) then currentParty = value end
+                    end
+                end
+            end
+        end
+        hubMain.partyLobbies = hubMain.partyLobbies or {}
+        hubMain.partyLobbies["DragonDefense"] = includesYou(currentParty)
+        cullingLobby = hubMain.partyLobbies.Culling == true or hubMain.partyLobbies.DragonDefense == true
+        if includesYou(currentParty) then state.ownsLobby = true end
+        return currentParty
+    end
+    local function higherPriority()
+        if not S("Priority.LeaveForPriority") then return nil end
+        for _, other in ipairs({"Dungeon", "Trial"}) do
+            if S(GAMEMODES[other].toggle) and priorityRank(other) < priorityRank("DragonDefense") and isOpen(other) then return other end
+        end
+        if S("Culling.Enabled") and priorityRank("Culling") < priorityRank("DragonDefense") then return "Culling" end
+        if worldBoss.enabled and priorityRank("World Boss") < priorityRank("DragonDefense")
+            and (busyBoss == worldBoss or worldBoss.phase == "gamemode" or worldBoss.phase == "queued"
+                or worldBoss.phase == "teleporting" or worldBoss.phase == "holding"
+                or worldBoss.phase == "returning") then return "World Boss" end
+        return nil
+    end
+    local function wave(sessionId)
+        local client = workspace:FindFirstChild("Client")
+        local maps = client and client:FindFirstChild("Maps")
+        local map = maps and maps:FindFirstChild("Dragon Defense")
+        local sessions = map and map:FindFirstChild("GamemodeSessions")
+        local holder = sessions and sessions:FindFirstChild(sessionId)
+        if not holder or not holder:FindFirstChild("StateManager") then return nil end
+        local manager = Omni.Utils.StateManager.Get(holder)
+        if not manager then return nil end
+        local value = manager:GetState("CurrentWave")
+        return tonumber(value)
+    end
+    local function combat(sessionId, active)
+        if not active() or Omni.Data.GamemodeSession ~= sessionId or Omni.Data.Gamemode ~= "Dragon Defense" then return end
+        if not S("DragonDefense.TeleportToEnemies") then state.target = nil; return end
+        local root, _, character = getRoot()
+        if not root then return end
+        if state.session ~= sessionId then state.session, state.target, state.positioned = sessionId, nil, nil end
+        local candidates = {}
+        for _, enemy in ipairs(game:GetService("CollectionService"):GetTagged("Enemy")) do
+            if enemy.Parent and enemy:GetAttribute("Gamemode") == "Dragon Defense" and enemy:GetAttribute("SessionID") == sessionId
+                and not enemy:GetAttribute("Died") then
+                local data = enemy:FindFirstChild("Data")
+                local health = data and data:FindFirstChild("Health")
+                local hp = health and tonumber(health.Value)
+                if not hp or hp > 0 then
+                    local cf = Omni.Utils.Enemies.GetPosition(enemy:GetAttribute("EnemyID"))
+                    if typeof(cf) == "CFrame" then
+                        table.insert(candidates, {id = enemy:GetAttribute("EnemyID"), object = enemy, cf = cf, alive = true,
+                            shielded = enemy:GetAttribute("Shielded") == true,
+                            boss = enemy:GetAttribute("Difficulty") == "Boss" or enemy:GetAttribute("Difficulty") == "Secret"
+                                or enemy:GetAttribute("Shielded") == true,
+                            distance = (cf.Position - root.Position).Magnitude})
+                    end
+                end
+            end
+        end
+        -- The original picker calls pickTarget only after retaining a living current target.
+        state.target = pickDragonDefenseTarget(state.target, candidates)
+        local target = state.target
+        if not target then state.combat = "Waiting for minis / an unshielded enemy"; return end
+        if state.positioned ~= target.object or state.character ~= character
+            or (target.cf.Position - root.Position).Magnitude > 10 then
+            local position = (target.cf * CFrame.new(0, 0, 4)).Position + Vector3.new(0, 5, 0)
+            local facing = Vector3.new(target.cf.LookVector.X, 0, target.cf.LookVector.Z)
+            if facing.Magnitude < 0.001 then facing = Vector3.new(0, 0, -1) end
+            if teleportTo(CFrame.lookAt(position, position + facing.Unit)) then
+                state.positioned, state.character = target.object, character
+            end
+        end
+        if not active() or target.object:GetAttribute("Shielded") then return end
+        state.combat = "Attacking " .. tostring(target.object:GetAttribute("EnemyName"))
+        Omni.Scripts.General.Combat.Attack()
+        if os.clock() - (state.lastFighters or 0) >= 1 and not state.fighterBusy then
+            local available = {}
+            for id, enemyId in pairs(Omni.Utils.PlayerStats.GetFighterTargets(Omni.Data, Omni.Instance)) do
+                if enemyId == "" then table.insert(available, id) end
+            end
+            if #available > 0 then
+                state.lastFighters, state.fighterBusy = os.clock(), true
+                local thread = task.spawn(function()
+                    if active() and target.object.Parent and not target.object:GetAttribute("Died")
+                        and not target.object:GetAttribute("Shielded") then pcall(invoke, "Combat", "FighterAttack", target.id, available) end
+                    state.fighterBusy = false
+                end)
+                featureThreads[#featureThreads + 1] = thread
+            end
+        end
+    end
+    local function run(token)
+        local function active()
+            return alive and state.token == token and S("DragonDefense.Enabled") and not higherPriority()
+                and (not currentGamemode() or currentGamemode() == "Dragon Defense")
+        end
+        local liveSettings: {[string]: any} = {}
+        setmetatable(liveSettings, {__index = function(_, key)
+            if key == "requiredPlayers" then return math.clamp(tonumber(S("DragonDefense.StartPlayers")) or 1, 1, 10) end
+            if key == "autoLeave" then return S("DragonDefense.AutoLeave") end
+            if key == "leaveWave" then return math.max(1, tonumber(S("DragonDefense.Wave")) or 6) end
+            return nil
+        end})
+        local function refresh()
+            liveSettings.role, liveSettings.difficulty = S("DragonDefense.Role"), S("DragonDefense.Difficulty")
+            liveSettings.hostUserId = nil
+            local text = tostring(S("DragonDefense.Host") or ""):match("^%s*(.-)%s*$"):gsub("^@", "")
+            if liveSettings.role == "Player" and text ~= "" then
+                local id = tonumber(text)
+                if not id then
+                    for _, candidate in ipairs(Players:GetPlayers()) do if candidate.Name:lower() == text:lower() then id = candidate.UserId; break end end
+                    id = id or Players:GetUserIdFromNameAsync(text)
+                end
+                assert(id and id > 0 and id % 1 == 0 and id ~= player.UserId, "Player mode needs a valid friend's username/user ID.")
+                liveSettings.hostUserId = id
+            end
+        end
+        local function guardedSleep(seconds)
+            local deadline = os.clock() + seconds
+            while active() and os.clock() < deadline do task.wait(math.min(0.1, deadline - os.clock())) end
+            return active()
+        end
+        local info = assert(gamemodeInfo("Dragon Defense"), "Dragon Defense unavailable")
+        runAutomation({userId = player.UserId, maxMembers = info.MaxPartyMembers or 4, alive = active, now = os.clock,
+            refreshSettings = refresh,
+            setRequiredPlayers = function(count)
+                setSetting("DragonDefense.StartPlayers", count)
+                if env.FarmHubDragonDefensePlayerSlider then env.FarmHubDragonDefensePlayerSlider.Refresh() end
+            end,
+            data = function() return Omni.Data end, party = partySnapshot,
+            wave = wave, sleep = guardedSleep,
+            step = function(sessionId) state.ownsRun = true; combat(sessionId, active) end,
+            checkEntry = function(role)
+                assert(Omni.Utils.PlayerStats.OwnsMap(info.MapName, Omni.Data), "Unlock " .. info.MapName .. " first.")
+                if role == "Host" then
+                    local price = Omni.Shared.Gamemodes.GetPrice(info)
+                    if price then
+                        local amount = Omni.Shared.Gamemodes.GetPriceAmount(Omni.Data, price)
+                        assert(type(amount) ~= "number" or amount >= price.Amount, "Not enough " .. tostring(price.Name))
+                    end
+                end
+            end,
+            browse = function()
+                local result = invoke("Parties", "Browse", "Dragon Defense")
+                assert(type(result) == "table", "Could not read public lobbies")
+                return result
+            end,
+            fire = function(section, action, ...)
+                if active() then
+                    if section == "Parties" and (action == "Create" or action == "Join") then state.ownsLobby = true end
+                    if section == "Parties" and action == "Start" then state.ownsRun = true end
+                    logAction("DragonDefense " .. section .. "/" .. action)
+                    fire(section, action, ...)
+                end
+            end,
+            report = function(message, update)
+                state.message = message
+                state.members, state.wave = update.members or state.members, update.wave or state.wave
+                if update.cycles and update.cycles > (state.reportedCycles or 0) then
+                    state.cycles += update.cycles - (state.reportedCycles or 0)
+                    state.reportedCycles = update.cycles
+                end
+                setStatus("DragonDefense", message .. " | Wave: " .. tostring(state.wave or 0) .. " | Completed: " .. state.cycles)
+            end}, liveSettings)
+    end
+    every("DragonDefense coordinator", 0.2, function()
+        local reason = higherPriority()
+        local enabled = S("DragonDefense.Enabled")
+        local mode = currentGamemode()
+        if not enabled or reason or (mode and mode ~= "Dragon Defense") then
+            state.token += 1
+            if state.worker and coroutine.status(state.worker) ~= "dead" then pcall(task.cancel, state.worker) end
+            state.worker = nil
+            state.target, state.positioned = nil, nil
+            if mode == "Dragon Defense" and state.ownsRun then
+                if os.clock() - (state.leaveAt or -math.huge) >= 5 then
+                    state.leaveAt = os.clock()
+                    leaveGamemode(reason and (reason .. " has priority") or "Dragon Defense disabled")
+                end
+            elseif state.ownsLobby and includesYou(currentParty) then
+                state.ownsLobby = false
+                hubMain.partyLobbies = hubMain.partyLobbies or {}
+                hubMain.partyLobbies["DragonDefense"] = false
+                cullingLobby = hubMain.partyLobbies.Culling == true or hubMain.partyLobbies.DragonDefense == true
+                fire("Parties", "Leave")
+                currentParty = nil
+            end
+            setStatus("DragonDefense", reason and ("Paused for " .. reason .. "; resumes in a new lobby")
+                or (enabled and ("Paused: " .. tostring(mode)) or "Disabled"))
+            return
+        end
+        if state.leaveAt and mode == "Dragon Defense" then return end
+        state.leaveAt = nil
+        if state.worker and coroutine.status(state.worker) ~= "dead" then return end
+        state.token += 1
+        state.reportedCycles = 0
+        state.target, state.positioned = nil, nil
+        local token = state.token
+        state.worker = task.spawn(function()
+            local ok, failure = pcall(run, token)
+            if not ok and alive and state.token == token then
+                lastError =  "Dragon Defense: " .. tostring(failure)
+                state.message = lastError
+                allToggles["DragonDefense.Enabled"].set(false)
+                setStatus("DragonDefense", lastError)
+            end
+        end)
+        featureThreads[#featureThreads + 1] = state.worker
+    end)
+end
+-- END_PORTED_DRAGON_DEFENSE
 
 -- Rolls: Haki, Cursed Technique, Talents, Traits and Breathings on the game's cooldowns.
 local nextRoll = {}
@@ -4682,6 +5269,8 @@ cleanup = function(removeGui)
     end
     if env.FarmHubCulling then env.FarmHubCulling.token += 1; env.FarmHubCulling = nil end
     env.FarmHubCullingPlayerSlider = nil
+    if env.FarmHubDragonDefense then env.FarmHubDragonDefense.token += 1; env.FarmHubDragonDefense = nil end
+    env.FarmHubDragonDefensePlayerSlider = nil
     saveSettings()
     alive = false
 
