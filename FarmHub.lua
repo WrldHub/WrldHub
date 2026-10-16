@@ -2469,24 +2469,43 @@ hubMain.RARITY_RANK = { Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary 
     Mythical = 6, Secret = 7, Exclusive = 8 }
 hubMain.incubatorIds = {}
 hubMain.incubatorSkip = {}
--- Labels never include the level, so a queued fighter keeps the same entry while it trains.
+-- Labels end in "#" plus the start of the fighter ID. The level in front changes as the
+-- fighter trains, so saved queue entries are matched by that ID tag, not the whole label.
+function hubMain.labelTag(label)
+    return type(label) == "string" and string.match(label, "#(%S+)$") or nil
+end
 function hubMain.fighterLabel(id, fighter)
     local info = Omni.Shared.Fighters.List[fighter.Name]
-    return string.format("%s%s %s #%s", fighter.Name, fighter.Shiny and " Shiny" or "",
-        info and info.Rarity or "?", string.sub(id, 1, 6))
+    local level, slotted = fighter.Level or 1, false
+    pcall(function()
+        local incubator = Omni.Shared.Incubator
+        local slot = incubator.GetFighterSlot(Omni.Data, id)
+        if slot then
+            slotted = true
+            level = incubator.EstimateExp(Omni.Data, slot, workspace:GetServerTimeNow())
+        end
+    end)
+    return string.format("%s%s %s Lv %d%s #%s", fighter.Name, fighter.Shiny and " Shiny" or "",
+        info and info.Rarity or "?", level, slotted and " (in slot)" or "", string.sub(id, 1, 6))
 end
 -- Fighters that can still level up, best first. Queued fighters always stay listed.
 function hubMain.incubatorOptions()
     local entries, queued = {}, {}
-    for _, label in ipairs(settings["Dragon.IncubatorQueue"] or {}) do queued[label] = true end
+    hubMain.incubatorLabels = {}
+    for _, label in ipairs(settings["Dragon.IncubatorQueue"] or {}) do
+        local tag = hubMain.labelTag(label)
+        if tag then queued[tag] = true end
+    end
     pcall(function()
         local fighters = Omni.Shared.Fighters
         for id, fighter in pairs(Omni.Data.Fighters.List) do
             local info = fighters.List[fighter.Name]
             if info then
                 local label = hubMain.fighterLabel(id, fighter)
-                hubMain.incubatorIds[label] = id
-                if queued[label] or (fighter.Level or 1) < fighters.GetFighterMaxLevel(fighter, Omni.Data) then
+                local tag = hubMain.labelTag(label)
+                hubMain.incubatorIds[tag] = id
+                hubMain.incubatorLabels[tag] = label
+                if queued[tag] or (fighter.Level or 1) < fighters.GetFighterMaxLevel(fighter, Omni.Data) then
                     entries[#entries + 1] = { label = label, rank = hubMain.RARITY_RANK[info.Rarity] or 0,
                         shiny = fighter.Shiny and 1 or 0 }
                 end
@@ -2990,14 +3009,22 @@ end
 
 -- Incubator: keep every slot training the next queued fighter until it reaches the target level.
 every("Incubator", 5, function()
+    if hubMain.incubatorQueue then
+        farmCatalog.updateOptions(hubMain.incubatorQueue, "Dragon.IncubatorQueue", hubMain.incubatorOptions())
+        -- Swap saved entries for their current labels so the shown level stays up to date.
+        local queue, current, changed = S("Dragon.IncubatorQueue") or {}, {}, false
+        for i, label in ipairs(queue) do
+            local fresh = hubMain.incubatorLabels[hubMain.labelTag(label)] or label
+            current[i] = fresh
+            if fresh ~= label then changed = true end
+        end
+        if changed then hubMain.incubatorQueue.set(current, true) end
+    end
     if not S("Dragon.AutoIncubator") then
         setStatus("Incubator", "Disabled")
         return
     end
     local incubator, fighters, data = Omni.Shared.Incubator, Omni.Shared.Fighters, Omni.Data
-    if hubMain.incubatorQueue then
-        farmCatalog.updateOptions(hubMain.incubatorQueue, "Dragon.IncubatorQueue", hubMain.incubatorOptions())
-    end
     local now = workspace:GetServerTimeNow()
     local function targetFor(fighter)
         local maxLevel = fighters.GetFighterMaxLevel(fighter, data)
@@ -3047,7 +3074,7 @@ every("Incubator", 5, function()
     end
     local function nextFighter()
         for _, label in ipairs(S("Dragon.IncubatorQueue") or {}) do
-            local id = hubMain.incubatorIds[label]
+            local id = hubMain.incubatorIds[hubMain.labelTag(label)]
             if usable(id) then return id end
         end
         if not S("Dragon.IncubatorFill") then return nil end
