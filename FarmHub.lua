@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.16.2"
+local SCRIPT_VERSION = "2026.10.16.3"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -760,7 +760,7 @@ local function addToggle(section, text, key, default, onChange)
     }, track)
     round(knob, 7)
 
-    local toggle = {label = text}
+    local toggle = {label = text, row = row}
     local function render()
         local on = settings[key] == true
         track.BackgroundColor3 = on and COLORS.accent or COLORS.off
@@ -1205,12 +1205,63 @@ local RARITIES = { "--", "Common", "Rare", "Epic", "Legendary", "Mythical", "Sec
 local DUNGEON_ENTRY_GRACE = 75 -- seconds after :00 before assuming you skipped the dungeon
 local SHOP_NAME = "Adventurer Shop"
 local UPGRADE_GROUP = "Adventurer Upgrades"
-local SIDE_QUESTS = {
-    ["Slayers.QuestCrimsonMoon"] = "Beneath the Crimson Moon",
-    ["Sins.QuestGreedOfTheFox"] = "The Greed of the Fox",
-    ["Heaven.QuestCaptainsPromise"] = "A Captain's Promise",
-    ["Cursed.QuestWeightOfInfinity"] = "The Weight of Infinity"
-}
+-- Quest names are discovered from the game. These keys only preserve older saved toggles.
+local SIDE_QUESTS = { entries = {}, rows = {}, legacy = {
+    ["Beneath the Crimson Moon"] = "Slayers.QuestCrimsonMoon",
+    ["The Greed of the Fox"] = "Sins.QuestGreedOfTheFox",
+    ["A Captain's Promise"] = "Heaven.QuestCaptainsPromise",
+    ["The Weight of Infinity"] = "Cursed.QuestWeightOfInfinity"
+} }
+function SIDE_QUESTS.discover(catalog)
+    local entries = {}
+    for id, info in pairs(type(catalog) == "table" and catalog or {}) do
+        if type(info) == "table" then
+            local name = type(info.Name) == "string" and info.Name or id
+            if type(name) == "string" then
+                entries[#entries + 1] = { name = name, index = tonumber(info.Index) or math.huge,
+                    key = SIDE_QUESTS.legacy[name] or ("SideQuests.Auto." .. name) }
+            end
+        end
+    end
+    table.sort(entries, function(a, b)
+        if a.index ~= b.index then return a.index < b.index end
+        return a.name < b.name
+    end)
+    return entries
+end
+function SIDE_QUESTS.refresh()
+    if not SIDE_QUESTS.section then return end
+    local group = Omni.Shared.Quests.List.Side
+    if type(group) ~= "table" or type(group.List) ~= "table" then
+        SIDE_QUESTS.info.Text = "Waiting for the game's side quest catalog"
+        return
+    end
+    local entries = SIDE_QUESTS.discover(group.List)
+    local present = {}
+    SIDE_QUESTS.entries = {}
+    SIDE_QUESTS.ordered = entries
+    for index, entry in ipairs(entries) do
+        present[entry.key] = true
+        SIDE_QUESTS.entries[entry.key] = entry.name
+        local toggle = SIDE_QUESTS.rows[entry.key]
+        if not toggle then
+            toggle = addToggle(SIDE_QUESTS.section, entry.name, entry.key, false, function(value)
+                if not value then SIDE_QUESTS.active = false end
+                SIDE_QUESTS.target = nil
+            end)
+            SIDE_QUESTS.rows[entry.key] = toggle
+        end
+        toggle.row.LayoutOrder = 10 + index
+    end
+    for key, toggle in pairs(SIDE_QUESTS.rows) do
+        if not present[key] then
+            toggle.row:Destroy()
+            if allToggles[key] == toggle then allToggles[key] = nil end
+            SIDE_QUESTS.rows[key] = nil
+        end
+    end
+    SIDE_QUESTS.info.Text = tostring(#entries) .. " side quests found. New quests appear automatically."
+end
 
 local function S(key)
     return settings[key]
@@ -2445,6 +2496,8 @@ function hubMain.render()
         activity = busyBoss == worldBoss and ("World Boss\n" .. bossStatus(worldBoss)) or "Collecting lobby chests"
     elseif S("MobFarm.AutoFarm") then
         activity = "Mob Farm\n" .. statusLabels.MobFarm.Text
+    elseif SIDE_QUESTS.active then
+        activity = "Side Quest\n" .. statusLabels.SideQuests.Text
     elseif S("DragonDefense.Enabled") then
         activity = "Dragon Defense\n" .. statusLabels.DragonDefense.Text
     elseif S("Culling.Enabled") then
@@ -2741,11 +2794,13 @@ local function buildTabs()
     addToggle(section, "Weekly Quests", "Quests.Weekly", false, W)
 
     section = addSection(tab, 1, "Side Quests")
-    addToggle(section, "A Captain's Promise", "Heaven.QuestCaptainsPromise", false, W)
-    addToggle(section, "Beneath the Crimson Moon", "Slayers.QuestCrimsonMoon", false, W)
-    addToggle(section, "The Weight of Infinity", "Cursed.QuestWeightOfInfinity", false, W)
-    addToggle(section, "The Greed of the Fox", "Sins.QuestGreedOfTheFox", false, W)
-    addLabel(section, "Accepts and turns these in. The objectives themselves are not automated.", COLORS.dim)
+    SIDE_QUESTS.section = section
+    SIDE_QUESTS.info = addLabel(section, "Finding side quests...", COLORS.dim)
+    SIDE_QUESTS.info.LayoutOrder = 1
+    addLabel(section, "Accepts selected quests, farms their required bosses, and claims completed rewards. Bosses and gamemodes take priority.", COLORS.dim).LayoutOrder = 2
+    statusLabels.SideQuests = addLabel(section, "Select a side quest", COLORS.accent)
+    statusLabels.SideQuests.LayoutOrder = 3
+    SIDE_QUESTS.refresh()
 
     section = addSection(tab, 1, "Rewards")
     addToggle(section, "Auto Index", "Rewards.AutoIndex", false, W)
@@ -2954,6 +3009,7 @@ farmCatalog.refresh()
 -- variables per function, and the hub's main body is close to that.
 local function startFeatures()
 
+every("Side quest catalog", 5, SIDE_QUESTS.refresh)
 every("Farming catalog", 5, farmCatalog.refresh)
 connect(RunService.RenderStepped, hubMain.frame)
 connect(UserInputService.WindowFocusReleased, function() hubMain.setFocused(false) end)
@@ -2965,9 +3021,140 @@ hubMain.checkUpdate()
 
 -- Mob farm: stay next to the chosen mob in the chosen world.
 local lastFighterSend = 0
+-- Side quests use the live quest missions and enemy catalog, including future worlds.
+function SIDE_QUESTS.enemyWorld(mission)
+    for _, field in ipairs({"MapName", "World", "Map"}) do
+        if type(mission[field]) == "string" and WORLD_MAPS[mission[field]] then return mission[field] end
+    end
+    for world, enemies in pairs(Omni.Shared.Enemies.List or {}) do
+        if WORLD_MAPS[world] and type(enemies) == "table" then
+            for id, enemy in pairs(enemies) do
+                if type(enemy) == "table" and (id == mission.Name or enemy.Name == mission.Name) then return world end
+            end
+        end
+    end
+end
+SIDE_QUESTS.retry = {}
+every("Side quest objectives", 0.5, function()
+    SIDE_QUESTS.active = false
+    local questSystem, data = Omni.Shared.Quests, Omni.Data
+    local side = data.Quests and data.Quests.List and data.Quests.List.Side
+    if not side then return end
+    local chosen, info, saved
+    local selected, completed = 0, 0
+    for _, entry in ipairs(SIDE_QUESTS.ordered or {}) do
+        if S(entry.key) then
+            selected += 1
+            local definition = questSystem.List.Side.List[entry.name]
+            local progress = side.List and side.List[entry.name]
+            if definition then
+                local maximum = tonumber(definition.MaximumCompletions)
+                local finished = progress and progress.Claimed == true
+                    and (not maximum or (progress.Completions or 1) >= maximum)
+                if finished then completed += 1
+                elseif not chosen then chosen, info, saved = entry, definition, progress end
+            end
+        end
+    end
+    if not chosen then
+        SIDE_QUESTS.target = nil
+        setStatus("SideQuests", selected == 0 and "Select a side quest" or "All selected side quests completed")
+        return
+    end
+    local name = chosen.name
+    local canAccept, reason = questSystem.CanCollectQuest(name, "Side", data)
+    if canAccept then
+        if os.clock() >= (SIDE_QUESTS.retry[name] or 0) then
+            SIDE_QUESTS.retry[name] = os.clock() + 3
+            fire("Quests", "Collect", "Side", name)
+        end
+        setStatus("SideQuests", "Accepting " .. name)
+        return
+    end
+    if not saved or saved.Available ~= true or saved.Claimed == true then
+        setStatus("SideQuests", name .. ": " .. tostring(reason or "Waiting for quest unlock"))
+        return
+    end
+    local fraction, missions = questSystem.GetQuestProgress(name, "Side", data)
+    if (tonumber(fraction) or 0) >= 1 then
+        if os.clock() >= (SIDE_QUESTS.retry[name .. "/claim"] or 0) then
+            SIDE_QUESTS.retry[name .. "/claim"] = os.clock() + 3
+            fire("Quests", "Claim", "Side", name)
+            logAction("Side quest: claim " .. name)
+        end
+        setStatus("SideQuests", "Claiming " .. name)
+        return
+    end
+    if positionTaken() then
+        setStatus("SideQuests", name .. ": paused for boss or gamemode")
+        return
+    end
+    local mission
+    for index, objective in ipairs(info.Missions or {}) do
+        if (tonumber(missions and missions[index]) or 0) < 1 then mission = objective; break end
+    end
+    if not mission or mission.Type ~= "Kill" or type(mission.Name) ~= "string" then
+        setStatus("SideQuests", name .. ": remaining objective needs manual completion")
+        return
+    end
+    local world = SIDE_QUESTS.enemyWorld(mission)
+    if not world then
+        setStatus("SideQuests", name .. ": waiting for enemy world data")
+        return
+    end
+    if not Omni.Utils.PlayerStats.OwnsMap(world, data) then
+        setStatus("SideQuests", name .. ": unlock " .. world .. " first")
+        return
+    end
+    SIDE_QUESTS.active = true
+    if not ensureMap(world) then
+        setStatus("SideQuests", "Travelling to " .. world .. " for " .. mission.Name)
+        return
+    end
+    local root = getRoot()
+    if not root then setStatus("SideQuests", "Waiting for character"); return end
+    local target = SIDE_QUESTS.target
+    if not target or not target.Parent or target:GetAttribute("Died")
+        or target:GetAttribute("EnemyName") ~= mission.Name or hubMain.health(target) <= 0 then
+        target = hubMain.pick(findEnemies(serverFolder("Enemies", "Maps", world), mission.Name),
+            root.Position, {mission.Name}, "Bosses First", true)
+        SIDE_QUESTS.target = target
+    end
+    if not target then
+        setStatus("SideQuests", name .. ": waiting for " .. mission.Name .. " to spawn")
+        return
+    end
+    local position = enemyPosition(target)
+    if (position - root.Position).Magnitude > 8 then
+        teleportTo(CFrame.new(position + Vector3.new(0, 3, 4)))
+    end
+    setStatus("SideQuests", name .. ": fighting " .. mission.Name .. " (" .. math.floor((fraction or 0) * 100) .. "%)")
+    if target:GetAttribute("Shielded") then return end
+    Omni.Scripts.General.Combat.Attack()
+    if os.clock() - (SIDE_QUESTS.lastFighters or 0) >= 1 and not SIDE_QUESTS.fighterBusy then
+        local available = {}
+        for id, enemyId in pairs(Omni.Utils.PlayerStats.GetFighterTargets(data, Omni.Instance)) do
+            if enemyId == "" then available[#available + 1] = id end
+        end
+        if #available > 0 then
+            SIDE_QUESTS.lastFighters, SIDE_QUESTS.fighterBusy = os.clock(), true
+            featureThreads[#featureThreads + 1] = task.spawn(function()
+                if alive and S(chosen.key) and target.Parent and not target:GetAttribute("Died") then
+                    pcall(invoke, "Combat", "FighterAttack", target:GetAttribute("EnemyID"), available)
+                end
+                SIDE_QUESTS.fighterBusy = false
+            end)
+        end
+    end
+end)
+
 every("Mob Farm", 0.5, function()
     if not S("MobFarm.AutoFarm") then
         setStatus("MobFarm", "Disabled")
+        return
+    end
+    if SIDE_QUESTS.active then
+        setStatus("MobFarm", "Paused: Side Quest")
         return
     end
     if hubMain.dragonFarming or (hubMain.dragonTrip or 0) > os.clock() then
@@ -3022,6 +3209,7 @@ end)
 -- The request is tried from anywhere first; the trip only happens when the game refuses it.
 -- Returns the request's result, and whether it was already tried standing at the point.
 function hubMain.atDragonPrompt(promptName, request)
+    if SIDE_QUESTS.active then return nil, false end
     local ok, result = pcall(request)
     if ok and result then return result, false end
     if positionTaken() then return nil, false end
@@ -3158,6 +3346,11 @@ end)
 
 -- Dragon Balls: hunt the Dragon City enemies whose ball is still missing.
 every("Dragon Balls", 0.5, function()
+    if SIDE_QUESTS.active then
+        hubMain.dragonFarming = false
+        setStatus("DragonBalls", "Paused: Side Quest")
+        return
+    end
     if not S("Dragon.AutoBalls") then
         hubMain.dragonFarming = false
         setStatus("DragonBalls", "Disabled")
@@ -4939,14 +5132,7 @@ every("Quests", 60, function()
         end
     end
 
-    -- Named side quests: accept and turn in. The objectives themselves are not automated.
-    for key, name in pairs(SIDE_QUESTS) do
-        if S(key) then
-            fire("Quests", "Collect", "Side", name)
-            fire("Quests", "Claim", "Side", name)
-            task.wait(0.1)
-        end
-    end
+    -- Selected side quests are handled by the dedicated objective worker.
 end)
 
 -- Match the game's own reward UI checks. Each family runs independently so one
