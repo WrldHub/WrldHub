@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.13.1"
+local SCRIPT_VERSION = "2026.10.16.1"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -802,7 +802,7 @@ local function addButton(section, text, onClick)
 end
 
 local OPTION_HEIGHT = 26
-local function addDropdown(section, labelText, key, options, default, onChange, multiSelect)
+local function addDropdown(section, labelText, key, options, default, onChange, multiSelect, placeholder)
     if labelText then
         addLabel(section, labelText, COLORS.dim)
     end
@@ -857,7 +857,7 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
     local dropdown = {}
     local function renderValue()
         local selected = settings[key]
-        valueLabel.Text = multiSelect and (#selected > 0 and table.concat(selected, ", ") or "Select mobs...")
+        valueLabel.Text = multiSelect and (#selected > 0 and table.concat(selected, ", ") or placeholder or "Select mobs...")
             or tostring(selected)
         if multiSelect then
             for _, child in ipairs(list:GetChildren()) do
@@ -2463,6 +2463,66 @@ end
 -- locals in the main body. Setting keys are unchanged from earlier versions, so saved
 -- settings carry over.
 local errorLabel
+-- Dragon City helpers -------------------------------------------------------------------
+
+hubMain.RARITY_RANK = { Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5,
+    Mythical = 6, Secret = 7, Exclusive = 8 }
+hubMain.incubatorIds = {}
+hubMain.incubatorSkip = {}
+-- Labels never include the level, so a queued fighter keeps the same entry while it trains.
+function hubMain.fighterLabel(id, fighter)
+    local info = Omni.Shared.Fighters.List[fighter.Name]
+    return string.format("%s%s %s #%s", fighter.Name, fighter.Shiny and " Shiny" or "",
+        info and info.Rarity or "?", string.sub(id, 1, 6))
+end
+-- Fighters that can still level up, best first. Queued fighters always stay listed.
+function hubMain.incubatorOptions()
+    local entries, queued = {}, {}
+    for _, label in ipairs(settings["Dragon.IncubatorQueue"] or {}) do queued[label] = true end
+    pcall(function()
+        local fighters = Omni.Shared.Fighters
+        for id, fighter in pairs(Omni.Data.Fighters.List) do
+            local info = fighters.List[fighter.Name]
+            if info then
+                local label = hubMain.fighterLabel(id, fighter)
+                hubMain.incubatorIds[label] = id
+                if queued[label] or (fighter.Level or 1) < fighters.GetFighterMaxLevel(fighter, Omni.Data) then
+                    entries[#entries + 1] = { label = label, rank = hubMain.RARITY_RANK[info.Rarity] or 0,
+                        shiny = fighter.Shiny and 1 or 0 }
+                end
+            end
+        end
+    end)
+    table.sort(entries, function(a, b)
+        if a.rank ~= b.rank then return a.rank > b.rank end
+        if a.shiny ~= b.shiny then return a.shiny > b.shiny end
+        return a.label < b.label
+    end)
+    local labels = {}
+    for i, entry in ipairs(entries) do labels[i] = entry.label end
+    if #labels == 0 then labels[1] = "--" end
+    return labels
+end
+-- Every boost and reward Shenron can offer, in a sensible default order.
+function hubMain.wishDefaults()
+    local preferred = { "Secret Potion", "Potara", "Shiny Potion", "Mythical Potion", "Free Gems",
+        "+2.5 Luck", "2x Drops", "+2.5 Gacha Luck" }
+    local names = {}
+    pcall(function()
+        local wish = Omni.Shared.DragonWish
+        for _, name in ipairs(wish.GetOrderedBoosts()) do names[#names + 1] = name end
+        for _, reward in ipairs(wish.Rewards) do names[#names + 1] = reward.Name end
+    end)
+    local order = {}
+    for _, name in ipairs(preferred) do
+        if table.find(names, name) then order[#order + 1] = name end
+    end
+    for _, name in ipairs(names) do
+        if not table.find(order, name) then order[#order + 1] = name end
+    end
+    return order
+end
+
 local function buildTabs()
     local tab, section
     -- Main
@@ -2604,6 +2664,27 @@ local function buildTabs()
     section = addSection(tab, 2, "Sins Kingdom")
     addToggle(section, "Auto Commandments", "Sins.AutoCommandments", false, W)
     statusLabels.Commandments = addLabel(section, "Disabled", COLORS.accent)
+
+    section = addSection(tab, 1, "Dragon City: Incubator")
+    addToggle(section, "Auto Incubator", "Dragon.AutoIncubator", false, W)
+    statusLabels.Incubator = addLabel(section, "Disabled", COLORS.accent)
+    hubMain.incubatorQueue = addDropdown(section, "Queue (incubated in the order you tick them)",
+        "Dragon.IncubatorQueue", hubMain.incubatorOptions(), {}, W, true, "Pick fighters...")
+    addNumberBox(section, "Take out at level (0 = max level)", "Dragon.IncubatorTarget", 0)
+    addToggle(section, "Fill from inventory when the queue is done", "Dragon.IncubatorFill", false, W)
+    addToggle(section, "Auto Upgrade slots with Yen", "Dragon.IncubatorUpgrade", false, W)
+    addLabel(section, "Puts the next queued fighter in each free slot and takes it out at the target level. "
+        .. "Fill picks the best unequipped fighter that is not maxed (highest rarity, Shiny first).", COLORS.dim)
+
+    section = addSection(tab, 2, "Dragon City: Dragon Balls")
+    addToggle(section, "Auto Farm Dragon Balls", "Dragon.AutoBalls", false, W)
+    statusLabels.DragonBalls = addLabel(section, "Disabled", COLORS.accent)
+    addToggle(section, "Auto Summon Shenron", "Dragon.AutoSummon", false, W)
+    statusLabels.DragonWish = addLabel(section, "", COLORS.accent)
+    addPriorityList(section, "Dragon.WishOrder", hubMain.wishDefaults(), "Wish to move")
+    addLabel(section, "Hunts only the enemies whose ball you are missing (Secret and Boss first) and pauses "
+        .. "Mob Farm meanwhile. Ball 7 only drops from Dragon Defense, which the hub does not run. "
+        .. "Shenron's offer is answered with the highest wish in this list.", COLORS.dim)
 
     -- Quests and rewards
     tab = addTab("Quests & Rewards")
@@ -2842,6 +2923,10 @@ every("Mob Farm", 0.5, function()
         setStatus("MobFarm", "Disabled")
         return
     end
+    if hubMain.dragonFarming or (hubMain.dragonTrip or 0) > os.clock() then
+        setStatus("MobFarm", "Paused: Dragon City task")
+        return
+    end
     if not WORLD_MAPS[S("MobFarm.World")] or #S("MobFarm.Mobs") == 0 then
         setStatus("MobFarm", "Select a world and at least one mob")
         return
@@ -2884,6 +2969,236 @@ every("Mob Farm", 0.5, function()
     end
     setStatus("MobFarm", "Farming " .. tostring(target:GetAttribute("EnemyName"))
         .. " (" .. #S("MobFarm.Mobs") .. " selected)")
+end)
+
+-- Dragon City: run a request at one of its interaction points.
+-- The request is tried from anywhere first; the trip only happens when the game refuses it.
+-- Returns the request's result, and whether it was already tried standing at the point.
+function hubMain.atDragonPrompt(promptName, request)
+    local ok, result = pcall(request)
+    if ok and result then return result, false end
+    if positionTaken() then return nil, false end
+    hubMain.dragonTrip = os.clock() + 20
+    if not ensureMap("Dragon City") then return nil, false end
+    local part = serverFolder("ProximityPrompts", "Dragon City", promptName)
+    if not part then return nil, false end
+    teleportTo(part.CFrame + Vector3.new(0, 3, 0))
+    task.wait(1)
+    ok, result = pcall(request)
+    return ok and result or nil, true
+end
+
+-- Incubator: keep every slot training the next queued fighter until it reaches the target level.
+every("Incubator", 5, function()
+    if not S("Dragon.AutoIncubator") then
+        setStatus("Incubator", "Disabled")
+        return
+    end
+    local incubator, fighters, data = Omni.Shared.Incubator, Omni.Shared.Fighters, Omni.Data
+    if hubMain.incubatorQueue then
+        farmCatalog.updateOptions(hubMain.incubatorQueue, "Dragon.IncubatorQueue", hubMain.incubatorOptions())
+    end
+    local now = workspace:GetServerTimeNow()
+    local function targetFor(fighter)
+        local maxLevel = fighters.GetFighterMaxLevel(fighter, data)
+        local target = tonumber(S("Dragon.IncubatorTarget")) or 0
+        if target <= 0 or target > maxLevel then target = maxLevel end
+        return target
+    end
+
+    local lines, free, busy = {}, {}, {}
+    local slots = incubator.GetSlots(data)
+    for index = 1, #slots do
+        local id, fighter = incubator.GetSlotFighter(data, index)
+        if fighter then
+            busy[id] = true
+            local level, exp = incubator.EstimateExp(data, index, now)
+            local target = targetFor(fighter)
+            if level >= target then
+                local removed = hubMain.atDragonPrompt("Incubator Interface", function()
+                    invoke("Incubator", "TakeOut", index)
+                    task.wait(0.5)
+                    return incubator.GetSlotFighter(Omni.Data, index) == nil
+                end)
+                if removed then
+                    logAction("Incubator: took " .. fighter.Name .. " out of slot " .. index .. " at level " .. level)
+                    busy[id] = nil
+                    free[#free + 1] = index
+                else
+                    lines[#lines + 1] = string.format("Slot %d: taking out %s (Lv %d)", index, fighter.Name, level)
+                end
+            else
+                local needed, rate = -(exp or 0), incubator.GetEffectiveRate(data, index)
+                for nextLevel = level + 1, target do
+                    needed = needed + (fighters.GetNeededExpForLevel(nextLevel, fighter, data) or 0)
+                end
+                lines[#lines + 1] = string.format("Slot %d (Lv %d): %s Lv %d/%d%s", index, slots[index].Level,
+                    fighter.Name, level, target, rate > 0 and (", " .. formatTime(needed / rate) .. " left") or "")
+            end
+        else
+            free[#free + 1] = index
+        end
+    end
+
+    local function usable(id)
+        local fighter = id and data.Fighters.List[id]
+        return fighter and not busy[id] and (hubMain.incubatorSkip[id] or 0) < os.clock()
+            and incubator.CanPlace(data, id) and (fighter.Level or 1) < targetFor(fighter)
+    end
+    local function nextFighter()
+        for _, label in ipairs(S("Dragon.IncubatorQueue") or {}) do
+            local id = hubMain.incubatorIds[label]
+            if usable(id) then return id end
+        end
+        if not S("Dragon.IncubatorFill") then return nil end
+        local best, bestScore = nil, -1
+        for id, fighter in pairs(data.Fighters.List) do
+            local info = fighters.List[fighter.Name]
+            if info and usable(id) then
+                local score = (hubMain.RARITY_RANK[info.Rarity] or 0) * 1000
+                    + (fighter.Shiny and 100 or 0) + (fighter.Level or 1)
+                if score > bestScore then best, bestScore = id, score end
+            end
+        end
+        return best
+    end
+    for _, index in ipairs(free) do
+        local id = nextFighter()
+        if not id then
+            lines[#lines + 1] = string.format("Slot %d: empty (queue done)", index)
+        else
+            local fighter = data.Fighters.List[id]
+            local placed, triedThere = hubMain.atDragonPrompt("Incubator Interface", function()
+                return invoke("Incubator", "Place", index, id) == true
+            end)
+            if placed then
+                busy[id] = true
+                logAction("Incubator: placed " .. fighter.Name .. " (Lv " .. tostring(fighter.Level or 1)
+                    .. ") in slot " .. index)
+                lines[#lines + 1] = string.format("Slot %d: placed %s", index, fighter.Name)
+            else
+                if triedThere then hubMain.incubatorSkip[id] = os.clock() + 120 end
+                lines[#lines + 1] = string.format("Slot %d: placing %s...", index, fighter.Name)
+            end
+        end
+    end
+
+    if S("Dragon.IncubatorUpgrade") then
+        for index = 1, #slots do
+            local level = slots[index].Level
+            local price = incubator.GetUpgradePrice(level)
+            if price and (data.Yen or 0) >= price.Amount then
+                local upgraded = hubMain.atDragonPrompt("Incubator Interface", function()
+                    return invoke("Incubator", "Upgrade", index) == true
+                end)
+                if upgraded then
+                    logAction("Incubator: upgraded slot " .. index .. " to level " .. (level + 1))
+                end
+                break
+            end
+        end
+    end
+    setStatus("Incubator", #lines > 0 and table.concat(lines, "\n") or "No incubator slots yet")
+end)
+
+-- Dragon Balls: hunt the Dragon City enemies whose ball is still missing.
+every("Dragon Balls", 0.5, function()
+    if not S("Dragon.AutoBalls") then
+        hubMain.dragonFarming = false
+        setStatus("DragonBalls", "Disabled")
+        return
+    end
+    local wish, data = Omni.Shared.DragonWish, Omni.Data
+    local wanted, names, missing = {}, {}, 0
+    for index, ball in ipairs(wish.Balls) do
+        if not wish.IsBallOwned(data, index) then
+            missing = missing + 1
+            if ball.Difficulty ~= "Gamemode" and not wanted[ball.Enemy] then
+                wanted[ball.Enemy] = true
+                names[#names + 1] = ball.Enemy
+            end
+        end
+    end
+    local owned = #wish.Balls - missing
+    if #names == 0 then
+        hubMain.dragonFarming = false
+        setStatus("DragonBalls", missing == 0 and "All Dragon Balls collected"
+            or "Only Ball 7 is missing: it drops from Dragon Defense")
+        return
+    end
+    if positionTaken() then
+        hubMain.dragonFarming = false
+        setStatus("DragonBalls", "Paused: boss or gamemode has priority")
+        return
+    end
+    hubMain.dragonFarming = true
+    if not ensureMap("Dragon City") then
+        setStatus("DragonBalls", "Travelling to Dragon City")
+        return 2
+    end
+    local root = getRoot()
+    if not root then return end
+    local target = hubMain.pick(findEnemies(serverFolder("Enemies", "Maps", "Dragon City"), wanted),
+        root.Position, names, "Bosses First", true)
+    hubMain.target, hubMain.targetWorld = target, "Dragon City"
+    if not target then
+        setStatus("DragonBalls", string.format("Waiting for %s (%d/%d balls)",
+            table.concat(names, ", "), owned, #wish.Balls))
+        return
+    end
+    local position = enemyPosition(target)
+    if (position - root.Position).Magnitude > 8 then
+        teleportTo(CFrame.new(position + Vector3.new(0, 3, 3)))
+    end
+    if os.clock() - (hubMain.dragonSend or 0) > 1 then
+        hubMain.dragonSend = os.clock()
+        task.spawn(pcall, invoke, "Combat", "FighterAttack", target:GetAttribute("EnemyID"), equippedFighterIds())
+    end
+    setStatus("DragonBalls", string.format("Hunting %s (%d/%d balls)",
+        tostring(target:GetAttribute("EnemyName")), owned, #wish.Balls))
+end)
+
+-- Shenron: summon once all balls are in and take the highest-ranked wish on offer.
+every("Dragon Wish", 10, function()
+    if not S("Dragon.AutoSummon") then
+        setStatus("DragonWish", "")
+        return
+    end
+    local wish = Omni.Shared.DragonWish
+    if not wish.HasAllBalls(Omni.Data) then
+        if not (hubMain.lastWish and statusLabels.DragonWish.Text == hubMain.lastWish) then
+            setStatus("DragonWish", string.format("Summon waits for all balls (%d/%d)",
+                wish.GetOwnedCount(Omni.Data), #wish.Balls))
+        end
+        return
+    end
+    local options = hubMain.atDragonPrompt("DragonWish Interface", function()
+        local result = invoke("DragonWish", "Summon")
+        return type(result) == "table" and type(result.Options) == "table" and #result.Options > 0
+            and result.Options or nil
+    end)
+    if not options then
+        setStatus("DragonWish", "Summoning Shenron at the altar...")
+        return
+    end
+    local order = S("Dragon.WishOrder") or {}
+    local bestIndex, bestRank = 1, math.huge
+    for index, option in ipairs(options) do
+        local rank = table.find(order, option.Name) or math.huge
+        if rank < bestRank then bestIndex, bestRank = index, rank end
+    end
+    local choice = options[bestIndex]
+    local text = tostring(choice.Name) .. ((choice.Amount or 1) > 1 and (" x" .. tostring(choice.Amount)) or "")
+    local ok, result = pcall(invoke, "DragonWish", "Choose", bestIndex)
+    if ok and type(result) == "table" and result.Success == true then
+        logAction("Dragon Wish: chose " .. text)
+        notify("Shenron granted " .. text)
+        hubMain.lastWish = "Last wish: " .. text
+        setStatus("DragonWish", hubMain.lastWish)
+    else
+        local message = ok and type(result) == "table" and result.Message or result
+        setStatus("DragonWish", "Wish failed: " .. tostring(message))
+    end
 end)
 
 -- Gamemodes: join by schedule and priority, fight, and leave at the chosen wave.
