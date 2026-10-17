@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.4"
+local SCRIPT_VERSION = "2026.10.18.5"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -2537,6 +2537,69 @@ function hubMain.eventTimer(activity)
     end
     return activity .. ": " .. (wait < math.huge and formatTime(wait) or "no schedule")
 end
+-- The Main page reads the same live settings and unit data as the rolling workers.
+hubMain.gachaSpinCounts = {}
+function hubMain.spinningText()
+    local lines, data = {}, Omni.Data
+    local function add(name, status, current, rolls)
+        lines[#lines + 1] = name .. (rolls and (" | Rolls: " .. tostring(rolls)) or "")
+        if status and status ~= "" then lines[#lines + 1] = status:gsub(" | Rolls: %d+", ""):gsub(" | Spins: %d+", "") end
+        if current and current ~= "" then lines[#lines + 1] = "Current: " .. current end
+        lines[#lines + 1] = ""
+    end
+    if S("Talents.Enabled") then
+        local id = hubMain.talentPending and hubMain.talentPending.id or hubMain.talentCurrent
+        local fighter = id and data.Fighters.List[id]
+        local ranks = {}
+        if fighter then
+            for _, stat in ipairs(hubMain.talentStats) do
+                local talent = fighter.Talents or {}
+                ranks[#ranks+1] = stat .. " " .. tostring(talent.Current and talent.Current[stat] or "-")
+                    .. (talent.Locked and talent.Locked[stat] and " [locked]" or "")
+            end
+        end
+        add("Talents", statusLabels.Talents and statusLabels.Talents.Text,
+            #ranks>0 and table.concat(ranks, " | ") or nil, hubMain.talentRolls or 0)
+    end
+    if S("Traits.Enabled") then
+        local id = hubMain.traitPending and hubMain.traitPending.id or hubMain.traitCurrentId
+        local fighter = id and data.Fighters.List[id]
+        add("Traits", statusLabels.Traits and statusLabels.Traits.Text,
+            fighter and (tostring(fighter.Name) .. ": " .. tostring(hubMain.traitCurrent(fighter) or "None")) or nil,
+            hubMain.traitRolls or 0)
+    end
+    if S("Slayers.AutoBreathings") or S("Slayers.RollUntilThree") then
+        local triple = S("Slayers.RollUntilThree")
+        local id = triple and hubMain.tripleId or hubMain.autoBreathingId
+        local weapon = id and data.Weapons.List[id]
+        local entries = {}
+        if weapon then
+            for _, entry in pairs(weapon.Breathings and weapon.Breathings.Current or {}) do
+                if type(entry)=="table" and entry.Name then
+                    entries[#entries+1] = tostring(entry.Name) .. " (" .. tostring(entry.Rarity or "?")
+                        .. (entry.Locked and ", locked" or "") .. ")"
+                end
+            end
+        end
+        local label = statusLabels[triple and "TripleBreathings" or "AutoBreathings"]
+        add(triple and "Breathings: three-slot goal" or "Breathings",
+            label and label.Text, #entries>0 and table.concat(entries," | ") or nil,
+            triple and (hubMain.tripleRolls or 0) or (hubMain.autoBreathingRolls or 0))
+    end
+    for _, info in ipairs({
+        {name="Haki",key="Heaven.AutoHaki"},
+        {name="Cursed Technique",key="Cursed.AutoCursedTechnique"}
+    })do
+        if S(info.key)then
+            local gacha = data.Gacha and data.Gacha[info.name]
+            add(info.name,"Rolling",gacha and tostring(gacha.Current or "None") or "None",hubMain.gachaSpinCounts[info.name]or 0)
+        end
+    end
+    if #lines==0 then return "No active spins" end
+    if lines[#lines]==""then table.remove(lines)end
+    return table.concat(lines,"\n")
+end
+
 function hubMain.render()
     if not hubMain.labels.activity then return end
     hubMain.sample(Omni.Data)
@@ -2576,6 +2639,7 @@ function hubMain.render()
         .. "\nRuns entered / ended: " .. session.entered .. " / " .. session.ended
         .. "\nRewards confirmed: " .. session.rewards
         .. "\nItems received: " .. hubMain.number(session.items)
+    if hubMain.labels.spinning then hubMain.labels.spinning.Text = hubMain.spinningText() end
     hubMain.renderPerformance()
     hubMain.updateLabel()
 end
@@ -2913,6 +2977,8 @@ local function buildTabs()
     hubMain.labels.events = addLabel(section, "Loading timers...", COLORS.text)
     section = addSection(hubMain.tab, 1, "Stats")
     hubMain.labels.performance = addLabel(section, "Measuring performance...", COLORS.text)
+    section = addSection(hubMain.tab, 2, "Currently Spinning")
+    hubMain.labels.spinning = addLabel(section, "No active spins", COLORS.text)
     section = addSection(hubMain.tab, 2, "Session Statistics")
     hubMain.labels.stats = addLabel(section, "Starting session...", COLORS.text)
     addLabel(section, "Counts confirmed changes since starting this hub. Runs ended include manual and automatic exits.", COLORS.dim)
@@ -5238,6 +5304,7 @@ every("Trait queue",.25,function()
         hubMain.stopTraits("Trait queue complete: "..completed.." unit(s)"..(missing>0 and("; "..missing.." missing skipped")or ""))
         return
     end
+    hubMain.traitCurrentId = id
     local data,price=Omni.Data,Omni.Shared.Traits.Price
     local balance=price.Type=="Item"and(data.Items.List[price.Name]or 0)or Omni.Shared.Upgrade.GetPriceAmount(data,price)
     local pending=hubMain.traitPending
@@ -5294,6 +5361,7 @@ every("Talent queue", 0.25, function()
         hubMain.stopTalents(tostring(fighter.Name) .. ": unlock " .. table.concat(blocked,", ") .. " to reach its goal")
         return
     end
+    hubMain.talentCurrent = id
     local data, info = Omni.Data, Omni.Shared.Gacha.List.Talents
     local price = info.Price
     local balance = price.Type=="Item" and (data.Items.List[price.Name] or 0) or Omni.Shared.Upgrade.GetPriceAmount(data,price)
@@ -5422,6 +5490,7 @@ every("Rolls", 0.25, function()
     for name, key in pairs({ Haki = "Heaven.AutoHaki", ["Cursed Technique"] = "Cursed.AutoCursedTechnique" }) do
         if S(key) and rollReady(name) then
             nextRoll[name] = os.clock() + playerStat("GachaCooldown", 1, name) + 0.1
+            hubMain.gachaSpinCounts[name] = (hubMain.gachaSpinCounts[name] or 0) + 1
             fire("Gacha", "Roll", name, nil, nextRequest())
         end
     end
