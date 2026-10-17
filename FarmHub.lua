@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.17.1"
+local SCRIPT_VERSION = "2026.10.18.1"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -228,7 +228,8 @@ function configStore.validate(document)
         if type(key) == "string" and key:sub(1, 8) ~= "Configs." and key:sub(1, 1) ~= "_" and settings[key] ~= nil then
             assert(type(value) == type(settings[key]), "Wrong value type for " .. key)
             local copied = configStore.copy(value)
-            if key == "MobFarm.Mobs" or key == "Priority.Order" or key == "LevelUpgrades.Order" then
+            if key == "MobFarm.Mobs" or key == "Priority.Order" or key == "LevelUpgrades.Order"
+                or key == "Slayers.StopAt" or key == "Slayers.Rarity" then
                 local seen = {}
                 assert(#copied <= 128, "Too many selections")
                 for index, name in pairs(copied) do
@@ -2672,6 +2673,57 @@ function hubMain.startTriple(value)
     end
 end
 
+-- Multi-choice filters apply to unlocked results only.
+function hubMain.breathSelection(value)
+    local result, seen = {}, {}
+    if type(value) == "string" then value = {value} end
+    for _, name in ipairs(type(value) == "table" and value or {}) do
+        if type(name) == "string" and name ~= "--" and not seen[name] then
+            seen[name] = true
+            result[#result + 1] = name
+        end
+    end
+    return result
+end
+settings["Slayers.StopAt"] = hubMain.breathSelection(settings["Slayers.StopAt"])
+settings["Slayers.Rarity"] = hubMain.breathSelection(settings["Slayers.Rarity"])
+function hubMain.breathMatch(entry, names, rarities, gameStops)
+    if type(entry) ~= "table" or entry.Locked then return false end
+    if #names == 0 and #rarities == 0 then
+        return gameStops and gameStops[entry.Name] and gameStops[entry.Name][entry.Rarity] == true or false
+    end
+    return (#names == 0 or table.find(names, entry.Name) ~= nil)
+        and (#rarities == 0 or table.find(rarities, entry.Rarity) ~= nil)
+end
+function hubMain.stopAutoBreathings(message)
+    hubMain.autoBreathingId, hubMain.autoBreathingPending = nil, nil
+    settings["Slayers.BreathingPinnedId"] = nil
+    if allToggles["Slayers.AutoBreathings"] then allToggles["Slayers.AutoBreathings"].set(false, true) end
+    setStatus("AutoBreathings", message)
+end
+function hubMain.startAutoBreathings(value)
+    hubMain.autoBreathingPending = nil
+    if not value then
+        hubMain.autoBreathingId = nil
+        settings["Slayers.BreathingPinnedId"] = nil
+        setStatus("AutoBreathings", "Stopped")
+        return
+    end
+    if S("Slayers.RollUntilThree") then hubMain.stopTriple("Stopped: Auto Breathings enabled") end
+    local id = S("Slayers.BreathingPinnedId") or hubMain.tripleSelectedWeapon()
+    if not id or not Omni.Data.Weapons.List[id] then
+        hubMain.stopAutoBreathings("Select a weapon first")
+        return
+    end
+    hubMain.autoBreathingId, hubMain.autoBreathingRolls = id, 0
+    settings["Slayers.BreathingPinnedId"] = id
+    pcall(function()
+        local ui = require(player.PlayerScripts.Omni.Scripts.Interface.Breathings)
+        ui.CancelAuto()
+    end)
+    setStatus("AutoBreathings", "Checking unlocked breathings on " .. tostring(Omni.Data.Weapons.List[id].Name))
+end
+
 local function buildTabs()
     local tab, section
     -- Main
@@ -2818,25 +2870,30 @@ local function buildTabs()
 
     section = addSection(tab, 2, "Slayers Village")
     addToggle(section, "Auto Progression", "Slayers.AutoProgression", false, W)
-    addToggle(section, "Auto Breathings", "Slayers.AutoBreathings", false, function(value)
-        if value and S("Slayers.RollUntilThree") then hubMain.stopTriple("Stopped: normal Auto Breathings enabled") end
-    end)
-    addSubHeader(section, "Roll until three breathings")
     hubMain.tripleDropdown = addDropdown(section, "Weapon to roll", "Slayers.TripleWeapon",
         hubMain.tripleWeaponOptions(), "Game Menu Selection", function()
             if S("Slayers.RollUntilThree") then hubMain.stopTriple("Weapon changed; enable again to start") end
+            if S("Slayers.AutoBreathings") then hubMain.stopAutoBreathings("Weapon changed; enable again to start") end
         end)
     addButton(section, "Refresh weapon list", function()
         hubMain.tripleDropdown.setOptions(hubMain.tripleWeaponOptions())
     end)
+    addDropdown(section, "Desired breathings (select multiple)", "Slayers.StopAt", sortedKeys(function()
+        return Omni.Shared.Breathings.List
+    end), {}, W, true, "Any breathing")
+    do
+        local rarities = {}
+        for _, rarity in ipairs(RARITIES) do if rarity ~= "--" then rarities[#rarities + 1] = rarity end end
+        addDropdown(section, "Desired rarities (select multiple)", "Slayers.Rarity", rarities, {}, W, true, "Any rarity")
+    end
+    addToggle(section, "Auto Breathings", "Slayers.AutoBreathings", false, hubMain.startAutoBreathings)
+    statusLabels.AutoBreathings = addLabel(section, "Stopped", COLORS.accent)
+    addLabel(section, "Manually spins the chosen weapon until an unlocked breathing matches your selected breathing and rarity. "
+        .. "Locked breathings are preserved and never trigger the stop. An empty list means any.", COLORS.dim)
+    addSubHeader(section, "Roll until three breathings")
     addToggle(section, "Roll Until 3 Breathings", "Slayers.RollUntilThree", false, hubMain.startTriple)
     statusLabels.TripleBreathings = addLabel(section, "Stopped", COLORS.accent)
-    addLabel(section, "Uses manual rolls and stops at any 3 breathings, including locked ones. "
-        .. "Preserves locks and ignores rarity stop settings in this mode. The chosen weapon stays fixed until stopped.", COLORS.dim)
-    addDropdown(section, "Stop at breathing", "Slayers.StopAt", sortedKeys(function()
-        return Omni.Shared.Breathings.List
-    end, "--"), "--", W)
-    addDropdown(section, "Stop at rarity", "Slayers.Rarity", RARITIES, "--", W)
+    addLabel(section, "Stops at any 3 breathings, including locked ones. This separate mode ignores the filters above.", COLORS.dim)
 
     section = addSection(tab, 2, "Cursed Academy")
     addToggle(section, "Auto Cursed Technique", "Cursed.AutoCursedTechnique", false, W)
@@ -4974,6 +5031,56 @@ every("Three breathings", 0.25, function()
     setStatus("TripleBreathings", tostring(weapon.Name) .. ": " .. count .. "/3 breathings | Rolls: " .. hubMain.tripleRolls)
 end)
 
+every("Auto breathing results", 0.25, function()
+    if not S("Slayers.AutoBreathings") or S("Slayers.RollUntilThree") then return end
+    local data = Omni.Data
+    local id = hubMain.autoBreathingId
+    local weapon = id and data.Weapons.List[id]
+    if not weapon then hubMain.stopAutoBreathings("Selected weapon is unavailable");return end
+    local names = hubMain.breathSelection(S("Slayers.StopAt"))
+    local rarities = hubMain.breathSelection(S("Slayers.Rarity"))
+    local gameStops = data.Breathings and data.Breathings.AutoStop or {}
+    local hasStop = #names > 0 or #rarities > 0
+    if not hasStop then
+        for _, list in pairs(gameStops) do
+            if type(list) == "table" then for _, wanted in pairs(list) do if wanted == true then hasStop = true end end end
+        end
+    end
+    if not hasStop then hubMain.stopAutoBreathings("Select at least one desired breathing or rarity");return end
+    local unlocked, locked, hit = 0, 0, nil
+    for _, entry in pairs(weapon.Breathings and weapon.Breathings.Current or {}) do
+        if type(entry) == "table" and entry.Name then
+            if entry.Locked then locked += 1 else unlocked += 1 end
+            if hubMain.breathMatch(entry, names, rarities, gameStops) then hit = entry end
+        end
+    end
+    if hit then
+        local message = tostring(hit.Rarity) .. " " .. tostring(hit.Name) .. " matched on " .. tostring(weapon.Name) .. ". Stopped."
+        hubMain.stopAutoBreathings(message)
+        notify(message)
+        return
+    end
+    if unlocked == 0 and locked > 0 then hubMain.stopAutoBreathings("All breathings are locked; unlock one to roll");return end
+    local price = Omni.Shared.Breathings.Price
+    local balance = price.Type == "Item" and (data.Items.List[price.Name] or 0)
+        or Omni.Shared.Upgrade.GetPriceAmount(data, price)
+    local pending = hubMain.autoBreathingPending
+    if pending then
+        if balance < pending.balance or (weapon.Breathings and weapon.Breathings.Current) ~= pending.current then
+            hubMain.autoBreathingPending = nil
+            nextRoll.Breathings = os.clock() + playerStat("BreathingsCooldown", 2) + .25
+        elseif os.clock() - pending.at > 10 then hubMain.stopAutoBreathings("No roll confirmation received; stopped") end
+        return
+    end
+    if not rollReady("Breathings") then return end
+    if balance < price.Amount then hubMain.stopAutoBreathings("Not enough " .. tostring(price.Name) .. "; stopped");return end
+    hubMain.autoBreathingPending = {balance=balance,current=weapon.Breathings and weapon.Breathings.Current,at=os.clock()}
+    hubMain.autoBreathingRolls = (hubMain.autoBreathingRolls or 0) + 1
+    nextRoll.Breathings = os.clock() + playerStat("BreathingsCooldown", 2) + .25
+    fire("Breathings", "Spin", id, nextRequest())
+    setStatus("AutoBreathings", tostring(weapon.Name) .. ": " .. locked .. " locked, " .. unlocked .. " unlocked | Rolls: " .. hubMain.autoBreathingRolls)
+end)
+
 every("Rolls", 0.25, function()
     local data = Omni.Data
     for name, key in pairs({ Haki = "Heaven.AutoHaki", ["Cursed Technique"] = "Cursed.AutoCursedTechnique" }) do
@@ -4983,33 +5090,7 @@ every("Rolls", 0.25, function()
         end
     end
 
-    if S("Slayers.AutoBreathings") and not S("Slayers.RollUntilThree") and rollReady("Breathings") then
-        local weaponId = data.Weapons.Equipped
-        local weapon = weaponId and data.Weapons.List[weaponId]
-        if weapon then
-            local stopName, stopRarity = S("Slayers.StopAt"), S("Slayers.Rarity")
-            local gameStops = data.Breathings and data.Breathings.AutoStop or {}
-            local hit = nil
-            for _, entry in pairs(weapon.Breathings and weapon.Breathings.Current or {}) do
-                if not entry.Locked then
-                    local nameMatches = stopName ~= "--" and entry.Name == stopName
-                    local rarityMatches = stopRarity ~= "--" and entry.Rarity == stopRarity
-                    local wanted = (stopName ~= "--" or stopRarity ~= "--")
-                        and (stopName == "--" or nameMatches) and (stopRarity == "--" or rarityMatches)
-                    if wanted or (gameStops[entry.Name] and gameStops[entry.Name][entry.Rarity]) then
-                        hit = entry
-                    end
-                end
-            end
-            if hit then
-                allToggles["Slayers.AutoBreathings"].set(false)
-                notify(tostring(hit.Rarity) .. " " .. tostring(hit.Name) .. " rolled. Auto Breathings stopped.")
-            else
-                nextRoll.Breathings = os.clock() + playerStat("BreathingsCooldown", 2) + 0.2
-                fire("Breathings", "Spin", weaponId, nextRequest())
-            end
-        end
-    end
+
 end)
 
 -- Upgrades that cost currency: one attempt per tick, only while below the cap.
