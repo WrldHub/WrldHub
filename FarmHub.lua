@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.2"
+local SCRIPT_VERSION = "2026.10.18.3"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -229,7 +229,8 @@ function configStore.validate(document)
             assert(type(value) == type(settings[key]), "Wrong value type for " .. key)
             local copied = configStore.copy(value)
             if key == "MobFarm.Mobs" or key == "Priority.Order" or key == "LevelUpgrades.Order"
-                or key == "Slayers.StopAt" or key == "Slayers.Rarity" or key == "Talents.Queue" then
+                or key == "Slayers.StopAt" or key == "Slayers.Rarity" or key == "Talents.Queue"
+                or key == "Traits.Queue" or key == "Traits.Targets" or key == "Traits.Rarities" then
                 local seen = {}
                 assert(#copied <= 128, "Too many selections")
                 for index, name in pairs(copied) do
@@ -2797,6 +2798,54 @@ function hubMain.refreshTalentQueue()
     if changed then hubMain.talentQueue.set(refreshed, true) end
 end
 
+function hubMain.traitCurrent(fighter)
+    local trait = fighter and fighter.Trait
+    return type(trait) == "table" and trait.Current or (type(trait) == "string" and trait or nil)
+end
+function hubMain.traitMatches(fighter, names, rarities)
+    local name = hubMain.traitCurrent(fighter)
+    local info = name and Omni.Shared.Traits.List[name]
+    if not info then return false end
+    return (#names == 0 or table.find(names, name) ~= nil)
+        and (#rarities == 0 or table.find(rarities, info.Rarity) ~= nil)
+end
+function hubMain.traitRarityOptions()
+    local seen, options = {}, {}
+    for _, info in pairs(Omni.Shared.Traits.List or {}) do
+        if type(info.Rarity) == "string" and not seen[info.Rarity] then
+            seen[info.Rarity] = true;options[#options+1] = info.Rarity
+        end
+    end
+    table.sort(options, function(a,b)return (hubMain.RARITY_RANK[a]or 0)<(hubMain.RARITY_RANK[b]or 0)end)
+    return options
+end
+function hubMain.refreshTraitQueue()
+    if not hubMain.traitQueue then return end
+    local options = hubMain.talentUnitOptions()
+    farmCatalog.updateOptions(hubMain.traitQueue, "Traits.Queue", options)
+    local refreshed, changed = {}, false
+    for index,label in ipairs(S("Traits.Queue") or {})do
+        local current=hubMain.talentLabels[hubMain.labelTag(label)]or label
+        refreshed[index]=current
+        if current~=label then changed=true end
+    end
+    if changed then hubMain.traitQueue.set(refreshed,true)end
+end
+function hubMain.stopTraits(message)
+    hubMain.traitPending = nil
+    if allToggles["Traits.Enabled"] then allToggles["Traits.Enabled"].set(false,true)end
+    setStatus("Traits",message)
+end
+function hubMain.startTraits(value)
+    hubMain.traitPending,hubMain.traitRolls=nil,0
+    if not value then setStatus("Traits","Stopped");return end
+    pcall(function()
+        local ui=require(player.PlayerScripts.Omni.Scripts.Interface.Traits)
+        ui.CancelAuto()
+    end)
+    setStatus("Traits","Checking queued units")
+end
+
 local function buildTabs()
     local tab, section
     -- Main
@@ -3030,7 +3079,7 @@ local function buildTabs()
     addNumberBox(section, "Drops target", "LevelUpgrades.DropsTarget", 4)
 
     -- Talents
-    tab = addTab("Talents")
+    tab = addTab("Trait/Talent")
     section = addSection(tab, 1, "Unit Queue")
     hubMain.talentQueue = addDropdown(section, "Units (processed in the order you select them)", "Talents.Queue",
         hubMain.talentUnitOptions(), {}, W, true, "Select units...")
@@ -3053,6 +3102,23 @@ local function buildTabs()
     end
     addLabel(section, "Ignore leaves a stat out of the goal. If an existing lock is below your target, "
         .. "unlock that stat yourself before starting. One stat stays unlocked, as required by the game.", COLORS.dim)
+
+    section = addSection(tab, 1, "Trait Unit Queue")
+    hubMain.traitQueue = addDropdown(section, "Trait units (selection order)", "Traits.Queue",
+        hubMain.talentUnitOptions(), {}, W, true, "Select units...")
+    addButton(section, "Refresh trait unit list", hubMain.refreshTraitQueue)
+    addToggle(section, "Auto Trait", "Traits.Enabled", false, hubMain.startTraits)
+    statusLabels.Traits = addLabel(section, "Stopped", COLORS.accent)
+    addLabel(section, "Uses manual Spin for one queued unit at a time. Advances when its trait matches, "
+        .. "then stops when the queue is complete or Trait Shards run out.", COLORS.dim)
+    section = addSection(tab, 2, "Desired Traits")
+    addDropdown(section, "Traits (select multiple)", "Traits.Targets", sortedKeys(function()
+        return Omni.Shared.Traits.List
+    end), {}, W, true, "Any trait")
+    addDropdown(section, "Trait rarities (select multiple)", "Traits.Rarities", hubMain.traitRarityOptions(),
+        {"Mythical"}, W, true, "Any rarity")
+    addLabel(section, "A result must match both lists. An empty list means any. "
+        .. "Units already matching are skipped without spending shards. Talent and trait queues are independent.", COLORS.dim)
 
     -- Items and shop
     tab = addTab("Items & Shop")
@@ -5092,6 +5158,57 @@ local nextRoll = {}
 local function rollReady(name)
     return os.clock() >= (nextRoll[name] or 0)
 end
+
+every("Trait queue catalog",5,hubMain.refreshTraitQueue)
+every("Trait queue",.25,function()
+    if not S("Traits.Enabled")then return end
+    local queue=S("Traits.Queue")or {}
+    if #queue==0 then hubMain.stopTraits("Select at least one trait unit");return end
+    local names,rarities=S("Traits.Targets")or {},S("Traits.Rarities")or {}
+    if #names==0 and #rarities==0 then hubMain.stopTraits("Select a desired trait or rarity");return end
+    local id,fighter
+    local completed,missing,seen=0,0,{}
+    for _,label in ipairs(queue)do
+        local candidateId=hubMain.talentIds[hubMain.labelTag(label)]
+        local candidate=candidateId and Omni.Data.Fighters.List[candidateId]
+        if not candidate then missing+=1
+        elseif not seen[candidateId]then
+            seen[candidateId]=true
+            if hubMain.traitMatches(candidate,names,rarities)then completed+=1
+            elseif not fighter then id,fighter=candidateId,candidate end
+        end
+    end
+    if not fighter then
+        hubMain.stopTraits("Trait queue complete: "..completed.." unit(s)"..(missing>0 and("; "..missing.." missing skipped")or ""))
+        return
+    end
+    local data,price=Omni.Data,Omni.Shared.Traits.Price
+    local balance=price.Type=="Item"and(data.Items.List[price.Name]or 0)or Omni.Shared.Upgrade.GetPriceAmount(data,price)
+    local pending=hubMain.traitPending
+    if pending then
+        local previous=data.Fighters.List[pending.id]
+        local signature=previous and game:GetService("HttpService"):JSONEncode(previous.Trait or {})
+        if balance<pending.balance or signature~=pending.signature then
+            hubMain.traitPending=nil
+            hubMain.traitNextAt=os.clock()+playerStat("TraitsCooldown",Omni.Shared.Traits.Cooldown or 1)+.25
+        elseif os.clock()-pending.at>10 then hubMain.stopTraits("Trait roll was not confirmed; stopped")end
+        return
+    end
+    if os.clock()<(hubMain.traitNextAt or 0)then return end
+    local current=hubMain.traitCurrent(fighter)
+    if current and data.Traits and data.Traits.AutoStop and data.Traits.AutoStop[current]then
+        hubMain.stopTraits(tostring(fighter.Name)..": uncheck "..current.." in the game's trait index before rerolling")
+        return
+    end
+    if balance<price.Amount then hubMain.stopTraits("Not enough "..tostring(price.Name).."; stopped");return end
+    local ui=require(player.PlayerScripts.Omni.Scripts.Interface.Traits)
+    ui.SelectFighter(id)
+    hubMain.traitPending={id=id,balance=balance,signature=game:GetService("HttpService"):JSONEncode(fighter.Trait or {}),at=os.clock()}
+    hubMain.traitRolls=(hubMain.traitRolls or 0)+1
+    ui.Roll()
+    setStatus("Traits","Unit "..(completed+1).."/"..(#queue-missing)..": "..tostring(fighter.Name)
+        .." | Current: "..tostring(current or "None").." | Spins: "..hubMain.traitRolls)
+end)
 
 every("Talent queue catalog", 5, hubMain.refreshTalentQueue)
 every("Talent queue", 0.25, function()
