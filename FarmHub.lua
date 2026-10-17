@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.3"
+local SCRIPT_VERSION = "2026.10.18.4"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -844,6 +844,28 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
         TextSize = 15
     }, button)
 
+    local searchable = key == "Talents.Queue" or key == "Traits.Queue"
+    local search
+    if searchable then
+        search = new("TextBox", {
+            Name = key .. ".Search",
+            Size = UDim2.new(1, 0, 0, 28),
+            BackgroundColor3 = COLORS.box,
+            BorderSizePixel = 0,
+            Text = "",
+            PlaceholderText = "Search units...",
+            PlaceholderColor3 = COLORS.dim,
+            TextColor3 = COLORS.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Font = FONT,
+            TextSize = TEXT_SIZE,
+            ClearTextOnFocus = false,
+            Visible = false
+        }, section)
+        round(search, 6)
+        new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10)}, search)
+    end
+
     -- The option list opens inline under the button and scrolls when it is long.
     local list = new("ScrollingFrame", {
         Size = UDim2.new(1, 0, 0, 0),
@@ -857,8 +879,42 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
     round(list, 6)
     new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
+    local empty
+    if searchable then
+        empty = new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, OPTION_HEIGHT),
+            BackgroundTransparency = 1,
+            Text = "   No units found",
+            TextColor3 = COLORS.dim,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Font = FONT,
+            TextSize = TEXT_SIZE,
+            Visible = false,
+            LayoutOrder = 100000
+        }, list)
+    end
+    local function applyFilter(resetScroll)
+        local query = search and string.lower(search.Text):match("^%s*(.-)%s*$") or ""
+        local visible = 0
+        for _, child in ipairs(list:GetChildren()) do
+            local option = child:GetAttribute("Option")
+            if child:IsA("TextButton") and option then
+                child.Visible = query == "" or string.find(string.lower(option), query, 1, true) ~= nil
+                if child.Visible then visible += 1 end
+            end
+        end
+        if empty then empty.Visible = visible == 0 end
+        local rows = searchable and math.max(1, visible) or visible
+        list.Size = UDim2.new(1, 0, 0, math.min(rows, 7) * OPTION_HEIGHT)
+        list.CanvasSize = UDim2.fromOffset(0, rows * OPTION_HEIGHT)
+        if resetScroll then list.CanvasPosition = Vector2.zero end
+    end
     local function setOpen(open)
         list.Visible = open
+        if search then
+            search.Visible = open
+            if open then search:CaptureFocus() else search:ReleaseFocus() end
+        end
         arrow.Text = open and "-" or "+"
     end
 
@@ -929,8 +985,7 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
                 end
             end)
         end
-        list.Size = UDim2.new(1, 0, 0, math.min(#newOptions, 7) * OPTION_HEIGHT)
-        list.CanvasSize = UDim2.fromOffset(0, #newOptions * OPTION_HEIGHT)
+        applyFilter(false)
         if multiSelect then renderValue() end
     end
 
@@ -941,6 +996,7 @@ local function addDropdown(section, labelText, key, options, default, onChange, 
     connect(button.Activated, function()
         setOpen(not list.Visible)
     end)
+    if search then connect(search:GetPropertyChangedSignal("Text"), function() applyFilter(true) end) end
     return dropdown
 end
 
