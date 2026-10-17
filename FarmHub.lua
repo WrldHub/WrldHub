@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.1"
+local SCRIPT_VERSION = "2026.10.18.2"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -229,7 +229,7 @@ function configStore.validate(document)
             assert(type(value) == type(settings[key]), "Wrong value type for " .. key)
             local copied = configStore.copy(value)
             if key == "MobFarm.Mobs" or key == "Priority.Order" or key == "LevelUpgrades.Order"
-                or key == "Slayers.StopAt" or key == "Slayers.Rarity" then
+                or key == "Slayers.StopAt" or key == "Slayers.Rarity" or key == "Talents.Queue" then
                 local seen = {}
                 assert(#copied <= 128, "Too many selections")
                 for index, name in pairs(copied) do
@@ -2724,6 +2724,79 @@ function hubMain.startAutoBreathings(value)
     setStatus("AutoBreathings", "Checking unlocked breathings on " .. tostring(Omni.Data.Weapons.List[id].Name))
 end
 
+-- Talent queue IDs stay stable when a fighter's level or displayed stats change.
+hubMain.talentIds, hubMain.talentLabels, hubMain.talentStats = {}, {}, {}
+function hubMain.talentSource()
+    return Omni.Shared.Gacha.List.Talents.Source.Talents
+end
+function hubMain.talentUnitOptions()
+    local entries = {}
+    hubMain.talentIds, hubMain.talentLabels = {}, {}
+    for id, fighter in pairs(Omni.Data.Fighters.List or {}) do
+        local tag = string.sub(id, 1, 8)
+        local label = tostring(fighter.Name) .. (fighter.Shiny and " Shiny" or "")
+            .. " Lv " .. tostring(fighter.Level or 1) .. " #" .. tag
+        hubMain.talentIds[tag], hubMain.talentLabels[tag] = id, label
+        entries[#entries + 1] = label
+    end
+    table.sort(entries)
+    return entries
+end
+function hubMain.talentRankOptions()
+    local entries, options = {}, {"Ignore"}
+    for rank, info in pairs(hubMain.talentSource().Ranks) do
+        entries[#entries + 1] = {name=rank,index=info.Index or 0}
+    end
+    table.sort(entries, function(a,b)return a.index<b.index end)
+    for _, entry in ipairs(entries) do options[#options + 1] = entry.name end
+    return options
+end
+function hubMain.talentEvaluation(fighter, goals)
+    local source, remaining, reached, blocked, chosen = hubMain.talentSource(), {}, {}, {}, 0
+    local talents = fighter.Talents or {}
+    local current, locked = talents.Current or {}, talents.Locked or {}
+    for stat, goal in pairs(goals) do
+        if goal ~= "Ignore" and source.Ranks[goal] then
+            chosen += 1
+            local rank = source.Ranks[current[stat]]
+            if rank and rank.Index >= source.Ranks[goal].Index then
+                if not locked[stat] then reached[#reached + 1] = stat end
+            else
+                remaining[#remaining + 1] = stat
+                if locked[stat] then blocked[#blocked + 1] = stat end
+            end
+        end
+    end
+    table.sort(reached);table.sort(remaining);table.sort(blocked)
+    return chosen, remaining, reached, blocked
+end
+function hubMain.stopTalents(message)
+    hubMain.talentPending = nil
+    if allToggles["Talents.Enabled"] then allToggles["Talents.Enabled"].set(false, true) end
+    setStatus("Talents", message)
+end
+function hubMain.startTalents(value)
+    hubMain.talentPending, hubMain.talentCurrent, hubMain.talentRolls = nil, nil, 0
+    if not value then setStatus("Talents", "Stopped");return end
+    pcall(function()
+        local ui = require(player.PlayerScripts.Omni.Scripts.Interface.Gacha.Talents)
+        ui.CancelAuto()
+    end)
+    setStatus("Talents", "Checking queued units")
+end
+function hubMain.refreshTalentQueue()
+    if not hubMain.talentQueue then return end
+    local options = hubMain.talentUnitOptions()
+    farmCatalog.updateOptions(hubMain.talentQueue, "Talents.Queue", options)
+    local refreshed, changed = {}, false
+    for index, label in ipairs(S("Talents.Queue") or {}) do
+        local current = hubMain.talentLabels[hubMain.labelTag(label)] or label
+        refreshed[index] = current
+        if current ~= label then changed = true end
+    end
+    if changed then hubMain.talentQueue.set(refreshed, true) end
+end
+
 local function buildTabs()
     local tab, section
     -- Main
@@ -2955,6 +3028,31 @@ local function buildTabs()
     addNumberBox(section, "Yen target", "LevelUpgrades.YenTarget", 2)
     addNumberBox(section, "Luck target", "LevelUpgrades.LuckTarget", 3)
     addNumberBox(section, "Drops target", "LevelUpgrades.DropsTarget", 4)
+
+    -- Talents
+    tab = addTab("Talents")
+    section = addSection(tab, 1, "Unit Queue")
+    hubMain.talentQueue = addDropdown(section, "Units (processed in the order you select them)", "Talents.Queue",
+        hubMain.talentUnitOptions(), {}, W, true, "Select units...")
+    addButton(section, "Refresh unit list", hubMain.refreshTalentQueue)
+    addToggle(section, "Auto Talent", "Talents.Enabled", false, hubMain.startTalents)
+    statusLabels.Talents = addLabel(section, "Stopped", COLORS.accent)
+    addLabel(section, "Finishes one unit's rank goals before moving to the next. Locks stats that reach their goals, "
+        .. "preserves your existing locks, and stops when the queue is complete or Talent Tokens run out.", COLORS.dim)
+    section = addSection(tab, 2, "Minimum Talent Ranks")
+    do
+        local fields = {}
+        for stat, info in pairs(hubMain.talentSource().List) do
+            fields[#fields + 1] = {name=stat,index=info.Index or 0,default=info.EndRank or "S"}
+        end
+        table.sort(fields, function(a,b)return a.index<b.index end)
+        for _, field in ipairs(fields) do
+            hubMain.talentStats[#hubMain.talentStats + 1] = field.name
+            addDropdown(section, field.name, "Talents.Goal." .. field.name, hubMain.talentRankOptions(), field.default, W)
+        end
+    end
+    addLabel(section, "Ignore leaves a stat out of the goal. If an existing lock is below your target, "
+        .. "unlock that stat yourself before starting. One stat stays unlocked, as required by the game.", COLORS.dim)
 
     -- Items and shop
     tab = addTab("Items & Shop")
@@ -4994,6 +5092,71 @@ local nextRoll = {}
 local function rollReady(name)
     return os.clock() >= (nextRoll[name] or 0)
 end
+
+every("Talent queue catalog", 5, hubMain.refreshTalentQueue)
+every("Talent queue", 0.25, function()
+    if not S("Talents.Enabled") then return end
+    local queue, goals = S("Talents.Queue") or {}, {}
+    if #queue == 0 then hubMain.stopTalents("Select at least one unit");return end
+    for _, stat in ipairs(hubMain.talentStats) do goals[stat] = S("Talents.Goal." .. stat) or "Ignore" end
+    local id, fighter, remaining, reached, blocked
+    local completed, missing, seen = 0, 0, {}
+    for _, label in ipairs(queue) do
+        local candidateId = hubMain.talentIds[hubMain.labelTag(label)]
+        local candidate = candidateId and Omni.Data.Fighters.List[candidateId]
+        if not candidate then missing += 1
+        elseif not seen[candidateId] then
+            seen[candidateId] = true
+            local count, todo, ready, locked = hubMain.talentEvaluation(candidate, goals)
+            if count == 0 then hubMain.stopTalents("Choose a minimum rank for at least one stat");return end
+            if #todo == 0 then completed += 1
+            elseif not fighter then id,fighter,remaining,reached,blocked=candidateId,candidate,todo,ready,locked end
+        end
+    end
+    if not fighter then
+        hubMain.stopTalents("Queue complete: " .. completed .. " unit(s)" .. (missing>0 and ("; " .. missing .. " missing unit(s) skipped") or ""))
+        return
+    end
+    if #blocked > 0 then
+        hubMain.stopTalents(tostring(fighter.Name) .. ": unlock " .. table.concat(blocked,", ") .. " to reach its goal")
+        return
+    end
+    local data, info = Omni.Data, Omni.Shared.Gacha.List.Talents
+    local price = info.Price
+    local balance = price.Type=="Item" and (data.Items.List[price.Name] or 0) or Omni.Shared.Upgrade.GetPriceAmount(data,price)
+    local signature = game:GetService("HttpService"):JSONEncode(fighter.Talents and fighter.Talents.Current or {})
+    local pending = hubMain.talentPending
+    if pending then
+        local old = data.Fighters.List[pending.id]
+        local updated = old and game:GetService("HttpService"):JSONEncode(old.Talents and old.Talents.Current or {})
+        if balance < pending.balance or updated ~= pending.signature then
+            hubMain.talentPending = nil
+            hubMain.talentNextAt = os.clock() + playerStat("GachaCooldown",1,"Talents") + .25
+        elseif os.clock()-pending.at>10 then hubMain.stopTalents("Talent roll was not confirmed; stopped")end
+        return
+    end
+    if os.clock() < (hubMain.talentNextAt or 0) then return end
+    local ui = require(player.PlayerScripts.Omni.Scripts.Interface.Gacha.Talents)
+    local locked = fighter.Talents and fighter.Talents.Locked or {}
+    local unlocked = 0
+    for stat in pairs(hubMain.talentSource().List) do if not locked[stat] then unlocked+=1 end end
+    ui.SelectFighter(id)
+    if #reached>0 and unlocked>1 then
+        local stat = reached[1]
+        ui.ToggleLock(stat)
+        hubMain.talentNextAt = os.clock() + .6
+        setStatus("Talents", tostring(fighter.Name) .. ": locking " .. stat .. " at its goal")
+        return
+    end
+    if unlocked==0 then hubMain.stopTalents("All stats are locked on " .. tostring(fighter.Name));return end
+    if balance < price.Amount * unlocked then hubMain.stopTalents("Not enough " .. tostring(price.Name) .. "; stopped");return end
+    hubMain.talentCurrent = id
+    hubMain.talentPending = {id=id,balance=balance,signature=signature,at=os.clock()}
+    hubMain.talentRolls = (hubMain.talentRolls or 0) + 1
+    ui.Roll()
+    setStatus("Talents", "Unit " .. (completed+1) .. "/" .. (#queue-missing) .. ": " .. tostring(fighter.Name)
+        .. " | Remaining: " .. table.concat(remaining,", ") .. " | Rolls: " .. hubMain.talentRolls)
+end)
 
 every("Three breathings", 0.25, function()
     if not S("Slayers.RollUntilThree") then return end
