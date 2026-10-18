@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.8"
+local SCRIPT_VERSION = "2026.10.18.9"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -3276,20 +3276,9 @@ local function buildTabs()
                 setStatus("Shop", "Refresh needs " .. amount .. " " .. price.Name)
                 return
             end
-            Omni.Signal:FireSelf("Interface", "Confirmation", "Start", {
-                Title = "Refresh Adventurer Shop",
-                Description = "Spend " .. amount .. " " .. price.Name .. " to refill every item?",
-                ConfirmText = "Refresh",
-                CancelText = "Cancel",
-                Callback = function(confirmed)
-                    if not confirmed then
-                        setStatus("Shop", "Shop refresh cancelled")
-                        return
-                    end
-                    fire("Merchant", "RestockAll", SHOP_NAME)
-                    setStatus("Shop", "Shop refresh requested")
-                end
-            })
+            -- No confirmation prompt: one click spends the refresh price straight away.
+            fire("Merchant", "RestockAll", SHOP_NAME)
+            setStatus("Shop", "Shop refreshed for " .. amount .. " " .. price.Name)
         end)
         if not ok then setStatus("Shop", "Refresh failed: " .. tostring(reason)) end
     end)
