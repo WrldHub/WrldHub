@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.7"
+local SCRIPT_VERSION = "2026.10.18.8"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -6040,6 +6040,7 @@ end)
 -- Adventurer Shop: buy the ticked items whenever they are in stock and affordable.
 local shopRetryAt = {}
 local shopExpectedStock = {}
+local shopSeenRestock = {}
 every("Shop", 10, function()
     if not S("Shop.AutoBuy") then
         setStatus("Shop", "Disabled")
@@ -6052,13 +6053,23 @@ every("Shop", 10, function()
     local bought, refused = 0, nil
     for name, info in pairs(shop and shop.Products or {}) do
         local price = info.Price
-        local stock = stockData[name] and stockData[name].Stock or 0
-        -- A purchase that left the stock unchanged was refused: back off for 5 minutes.
-        if shopExpectedStock[name] and stock > shopExpectedStock[name] then
-            shopRetryAt[name] = os.clock() + 300
+        local entry = stockData[name] or {}
+        local stock = entry.Stock or 0
+        local expected = shopExpectedStock[name]
+        shopExpectedStock[name] = nil
+        -- A restock (timer or Refresh Shop) ends any wait, and more stock after one is not a refusal.
+        if entry.LastRestock ~= shopSeenRestock[name] then
+            shopSeenRestock[name] = entry.LastRestock
+            shopRetryAt[name] = nil
+        end
+        if expected and entry.LastRestock ~= expected.restock then
+            expected = nil
+        end
+        if expected and stock > expected.stock then
+            -- A purchase that left the stock unchanged was refused: try it again shortly.
+            shopRetryAt[name] = os.clock() + 30
             refused = name
         end
-        shopExpectedStock[name] = nil
 
         if S("Shop.Buy." .. name) and stock > 0 and price and price.Type == "Item"
             and os.clock() >= (shopRetryAt[name] or 0) then
@@ -6067,9 +6078,9 @@ every("Shop", 10, function()
             if amount >= 1 then
                 logAction(string.format("Buy %dx %s from %s", amount, name, SHOP_NAME))
                 fire("Merchant", "Buy", SHOP_NAME, name, amount)
-                shopExpectedStock[name] = stock - amount
+                shopExpectedStock[name] = { stock = stock - amount, restock = entry.LastRestock }
                 bought = bought + amount
-                task.wait(0.4)
+                task.wait(1.5) -- the shop drops purchases sent closer together
             end
         end
     end
@@ -6077,7 +6088,7 @@ every("Shop", 10, function()
     if bought > 0 then
         setStatus("Shop", "Bought " .. bought .. " item(s)")
     elseif refused then
-        setStatus("Shop", "The shop refused " .. refused .. ". Retrying in 5 minutes.")
+        setStatus("Shop", "The shop refused " .. refused .. ". Retrying in 30 seconds.")
     else
         setStatus("Shop", "Waiting for stock or shards")
     end
