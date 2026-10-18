@@ -17,7 +17,7 @@ end
 -- Settings > Unload stops everything and removes it.
 
 -- Increment the release version when publishing changes to this script.
-local SCRIPT_VERSION = "2026.10.18.6"
+local SCRIPT_VERSION = "2026.10.18.7"
 local SCRIPT_URL = "https://raw.githubusercontent.com/WrldHub/WrldHub/main/FarmHub.lua"
 local launchFarmHub
 launchFarmHub = function(importedSettings)
@@ -2977,6 +2977,10 @@ local function buildTabs()
     hubMain.labels.events = addLabel(section, "Loading timers...", COLORS.text)
     section = addSection(hubMain.tab, 1, "Stats")
     hubMain.labels.performance = addLabel(section, "Measuring performance...", COLORS.text)
+    section = addSection(hubMain.tab, 1, "Power Breakdown")
+    statusLabels.Power = addLabel(section, "Loading...", COLORS.text)
+    addToggle(section, "Show multipliers", "Power.Details", false, W)
+    addLabel(section, "Power = damage per hit / seconds per hit. Potions and damage boosts don't count.", COLORS.dim)
     section = addSection(hubMain.tab, 2, "Currently Spinning")
     hubMain.labels.spinning = addLabel(section, "No active spins", COLORS.text)
     section = addSection(hubMain.tab, 2, "Session Statistics")
@@ -5915,6 +5919,84 @@ every("Pity", 3, function()
         end
     end
     setStatus("Pity", table.concat(lines, "\n"))
+end)
+
+-- Power breakdown. Mirrors PlayerStats.TotalPower: fighters and weapon each add damage / seconds per hit.
+every("Power", 5, function()
+    local data = Omni.Data
+    local shared = Omni.Shared
+    local fighters, gacha, traits, weapons = shared.Fighters, shared.Gacha, shared.Traits, shared.Weapons
+    local num = hubMain.number
+    local total = Omni.Utils.PlayerStats.TotalPower(data, Omni.Instance)
+    local function share(power)
+        return total > 0 and string.format("%.1f%%", power / total * 100) or "0%"
+    end
+
+    local order = {}
+    for id in pairs(data.Fighters.Equipped) do
+        local fighter = data.Fighters.List[id]
+        local base = fighter and fighters.GetBaseInformation(fighter, data)
+        if base then
+            local damage = fighters.GetFighterDamage(fighter, data, base)
+            local spa = fighters.GetFighterSPA(fighter, data, base)
+            local power = (damage > 0 and spa > 0) and damage / spa or 0
+            local level = fighters.GetFighterEffectiveLevel(fighter, data)
+            local talentDamage = gacha.GetFighterTalentMultiplier(fighter, "Damage")
+            local talentSpeed = gacha.GetFighterTalentMultiplier(fighter, "SPA")
+            local beforeTrait = base.Damage * (fighter.Shiny and 1.5 or 1) * 1.195 ^ (level - 1) * talentDamage
+            local traitDamage = beforeTrait > 0 and traits.ApplyAttribute(fighter, "Damage", beforeTrait) / beforeTrait or 1
+            local traitSpeed = traits.ApplyAttribute(fighter, "Attack Speed", 1)
+            order[#order + 1] = {
+                name = fighter.Name, shiny = fighter.Shiny, level = level, base = base,
+                damage = damage, spa = spa, power = power, talentDamage = talentDamage,
+                talentSpeed = talentSpeed, traitDamage = traitDamage, traitSpeed = traitSpeed
+            }
+        end
+    end
+    table.sort(order, function(a, b)
+        return a.power > b.power
+    end)
+
+    local details = S("Power.Details")
+    local lines = { "Total: " .. num(total) .. " (" .. withCommas(total) .. ")" }
+    for _, g in ipairs(order) do
+        lines[#lines + 1] = string.format("%s%s  %s  %s", g.name, g.shiny and " Shiny" or "", num(g.power),
+            share(g.power))
+        if details then
+            lines[#lines + 1] = string.format("   %s%s x%s(Lv%d) x%.2g(tal) x%.2g(trait) = %s / %.2fs",
+                num(g.base.Damage), g.shiny and " x1.5" or "", num(1.195 ^ (g.level - 1)), g.level,
+                g.talentDamage, g.traitDamage, num(g.damage), g.spa)
+        end
+    end
+    if #order == 0 then
+        lines[#lines + 1] = "No fighters equipped"
+    end
+
+    local weapon = data.Weapons.Equipped and data.Weapons.List[data.Weapons.Equipped]
+    local info = weapon and weapons.List[weapon.Name]
+    if info and #info.Hits > 0 then
+        local damage = weapons.GetAverageDamage(weapon, data, 1)
+        local spa = weapons.GetAverageSPA(weapon, data)
+        local power = (damage > 0 and spa > 0) and damage / spa or 0
+        local levelMulti = weapons.GetLevelDamageMultiplier(weapon)
+        local rawHit, rawCooldown = 0, 0
+        for _, hit in ipairs(info.Hits) do
+            rawHit = rawHit + (hit.Damage or 1)
+            rawCooldown = rawCooldown + (hit.Cooldown or 0)
+        end
+        rawHit, rawCooldown = rawHit / #info.Hits, rawCooldown / #info.Hits
+        local breathingDamage = (rawHit > 0 and levelMulti > 0) and damage / (rawHit * levelMulti) or 1
+        local breathingSpeed = spa > 0 and rawCooldown / spa or 1
+        lines[#lines + 1] = string.format("%s (Lv%s)  %s  %s", weapon.Name, tostring(weapon.Level or 1),
+            num(power), share(power))
+        if details then
+            lines[#lines + 1] = string.format("   %s x%.2f(Lv) x%.2f(breath) = %s / %.2fs (x%.2g speed)",
+                num(rawHit), levelMulti, breathingDamage, num(damage), spa, breathingSpeed)
+        end
+    else
+        lines[#lines + 1] = "No weapon equipped"
+    end
+    setStatus("Power", table.concat(lines, "\n"))
 end)
 
 -- Sacred Artefacts: upgrade any unlocked artefact you can afford, one per check.
